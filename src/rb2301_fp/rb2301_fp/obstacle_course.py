@@ -4,6 +4,8 @@ import math
 import os
 import numpy as np
 import rclpy
+from rb2301_fp import dynamic_window_approach
+
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
 from rclpy.qos import ReliabilityPolicy, QoSProfile
@@ -11,6 +13,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
+
 
 np.set_printoptions(2, suppress=True, threshold=np.inf) # Print numpy arrays to specified d.p., suppress scientific notation and do not truncate
 set_logger_level("obstaclecourse", level=LoggingSeverity.INFO) # Configure to either LoggingSeverity.INFO or LoggingSeverity.DEBUG  
@@ -78,6 +81,13 @@ class ObstacleCourseNode(Node):
         self.frame = self.course = None
         self._ticks = 0
 
+        #DWA
+        self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])
+        self._goal = np.array([10.0, 0.0])
+        self._trajectory = np.array(self._state)
+        self._ob = np.array([])
+        self._is_dwa_initialized = False
+
         if is_simulation:
             self.max_translate_velocity = 1.4
         else:
@@ -110,10 +120,25 @@ class ObstacleCourseNode(Node):
 
     def sub_scan_callback(self, msg):
         """Scan subscriber"""
-        if len(msg.ranges) <= 360:
+        if len(msg.ranges) <= 720:#was 360,choose whether want downsampling
             self.last_scan = np.array(msg.ranges)
         else:
             self.last_scan = np.array(msg.ranges)[::2] 
+
+        self.update_ob(msg)
+
+    def update_ob(self,msg):
+        if self.pose is None:
+            return
+        r = self.last_scan
+        step = 1 if r.size == len(msg.ranges) else 2
+        yaw = np.deg2rad(self.pose[2])
+        # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
+        a = msg.angle_min + np.arange(r.size) * msg.angle_increment * step + 3.1416 + yaw
+        valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
+        x = self.pose[0] + 0.11423 * np.cos(yaw)
+        y = self.pose[1] + 0.11423 * np.sin(yaw)
+        self._ob = np.column_stack((x + r[valid] * np.cos(a[valid]), y + r[valid] * np.sin(a[valid])))
 
     def yaw_from_quaternion(self, q):
         '''Returns yaw angle (in rad) for orientation based on given quaternion input q'''
@@ -154,6 +179,17 @@ class ObstacleCourseNode(Node):
         twist_msg.angular.x, twist_msg.angular.y, twist_msg.angular.z = 0.0, 0.0, float(turn)
         self.publisher_.publish(twist_msg)
 
+    def is_goal_reached(self,threshold = 0.3)->bool:
+        dist_to_goal = math.hypot(self._state[0] - self._goal[0], self._state[1] - self._goal[1])
+        if dist_to_goal <= threshold:
+            print("Goal!!")
+            return True
+        return False
+
+    def update_state(self)->np.ndarray:
+        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self._state[3], self._state[4]])
+
+
     def timer_callback(self):
         """Controller loop. Insert path planning and PID control logic here"""
         if self.pose is None:
@@ -169,7 +205,21 @@ class ObstacleCourseNode(Node):
 
         ###### INSERT CODE HERE ######
         self.get_logger().info(f"Pose: {self.pose}")
-        self.move_2D(0.1)
+
+        #try DWA integration
+
+        #TODO give sub goal
+
+        #TODO 
+        self._state = self.update_state()
+        self._trajectory = np.vstack((self._trajectory, self._state))
+        u, predicted_trajectory = dynamic_window_approach.dwa_control(self._state,
+                                                                        self._goal, 
+                                                                        self._ob)
+        self.move_2D(u[0],0.0,u[1])
+        self._state[3] , self._state[4] = u[0], u[1]    #TODO change this to real speed 
+        dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob)
+
         ###### INSERT CODE HERE ######
                 
 
