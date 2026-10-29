@@ -237,19 +237,20 @@ def calc_to_goal_cost(trajectory, goal):
 
 def calc_to_goal_heading_cost(trajectory,goal_heading):
     """
-        same as goal_cost calc but only use a single para
+        Absolute wrapped angle error to the target heading, in radians.
     """
     if goal_heading == '+x':
-        d = - trajectory[-1, 0]
+        target_yaw = 0.0
     elif goal_heading == '-x':
-        d = trajectory[-1, 0]
+        target_yaw = math.pi
     elif goal_heading == '+y':
-        d = - trajectory[-1,1]
+        target_yaw = math.pi / 2
     elif goal_heading == '-y':
-        d= trajectory[-1,1]
+        target_yaw = -math.pi / 2
     else:
         raise ValueError('goal_heading must be +x, -x, +y or -y')
-    return d
+    angle_error = target_yaw - trajectory[-1, 2]
+    return abs(math.atan2(math.sin(angle_error), math.cos(angle_error)))
 
 def plot_arrow(x, y, yaw, length=0.5, width=0.1):  # pragma: no cover
     plt.arrow(x, y, length * math.cos(yaw), length * math.sin(yaw),

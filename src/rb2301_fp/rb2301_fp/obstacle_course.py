@@ -273,7 +273,7 @@ class ObstacleCourseNode(Node):
         """
         利用ob数组有序的性质,检测阻挡子目标的那堵墙
         """
-        last_dot = None
+        
         if self.pose is None or self._ob.size == 0 or not self._sub_goal:
             return None
 
@@ -331,6 +331,7 @@ class ObstacleCourseNode(Node):
 
         # Find the global extreme before accepting any candidate segment.
         farthest_dot=self.pose[:2]
+        last_dot = None
         for dot in self._ob:
             if self._sub_goal[-1] == '+x':# update the farthest dot
                 if dot[0]>farthest_dot[0]:
@@ -348,11 +349,18 @@ class ObstacleCourseNode(Node):
                 raise ValueError('_sub_goal should only contain "+x","-x","+y"or"-y"')
 
         continuous_list=[]
+        last_trend = None
+        trend = None
         for dot in self._ob:
             if last_dot is not None:
                 distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
 
-            if (last_dot is not None and distance > self.density_threshold):#once the continuous list fracture or reaches the end
+                if abs(last_dot[0]-dot[0]) > abs(last_dot[1]-dot[1]):
+                    trend = 'x'
+                else:
+                    trend = 'y'
+
+            if (last_dot is not None and distance > self.density_threshold) or (last_trend is not None and trend != last_trend):  #once the continuous list fracture or reaches the end
                 result = check_segment(continuous_list,farthest_dot)
                 if result is not None:
                     return result
@@ -360,6 +368,7 @@ class ObstacleCourseNode(Node):
             else:
                 continuous_list.append(dot)
             last_dot = dot
+            last_trend = trend
         return check_segment(continuous_list,farthest_dot)
 
 def main(args=None):
