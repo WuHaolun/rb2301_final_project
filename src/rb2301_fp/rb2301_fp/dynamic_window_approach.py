@@ -36,11 +36,12 @@ class Config:
         self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
         self.dt = 0.1  # [s] Time tick for motion prediction
         self.predict_time = 2.5  # [s]
+
         self.to_goal_cost_gain = 0.10
         self.to_goal_heading_cost_gain = 0.02
 
         self.speed_cost_gain = 0.9
-        self.obstacle_cost_gain = 0.03
+        self.obstacle_cost_gain = 0.1
         self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
         self.robot_type = RobotType.rectangle
 
@@ -49,25 +50,9 @@ class Config:
         self.robot_radius = 1.0  # [m] for collision check
 
         # if robot_type == RobotType.rectangle
-        self.robot_width = 0.12  # [m] for collision check
-        self.robot_length = 0.12  # [m] for collision check
+        self.robot_width = 0.2  # [m] for collision check
+        self.robot_length = 0.2  # [m] for collision check
         # obstacles [x(m) y(m), ....]
-        self.ob = np.array([[-1, -1],
-                            [0, 2],
-                            [4.0, 2.0],
-                            [5.0, 4.0],
-                            [5.0, 5.0],
-                            [5.0, 6.0],
-                            [5.0, 9.0],
-                            [8.0, 9.0],
-                            [7.0, 9.0],
-                            [8.0, 10.0],
-                            [9.0, 11.0],
-                            [12.0, 13.0],
-                            [12.0, 12.0],
-                            [15.0, 15.0],
-                            [13.0, 13.0]
-                            ])
 
     @property
     def robot_type(self):
@@ -280,11 +265,22 @@ def plot_robot(x, y, yaw, config):  # pragma: no cover
                         np.array([np.cos(yaw), np.sin(yaw)]) * config.robot_radius)
         plt.plot([x, out_x], [y, out_y], "-k")
 
-#def calc_velocity(x,goal,ob):   #Receive state+goal+obstacle from node and compute velocity output
+def plot_seg(seg):
+    rng = np.random.default_rng()
 
-#def refresh_animation()
+    for segment in seg:
+        if len(segment) == 0:
+            continue
 
-def animate(predicted_trajectory,x,goal,ob,config=config):
+        points = np.asarray(segment)  
+        color = rng.random(3)         
+
+        plt.scatter(points[:, 0], points[:, 1], color=color,s=20, zorder=3)
+        print("ppp")
+
+
+def animate(predicted_trajectory,x,goal,ob,seg,config=config):
+
     if show_animation:
         plt.cla()
         # for stopping simulation with the esc key.
@@ -295,13 +291,13 @@ def animate(predicted_trajectory,x,goal,ob,config=config):
         plt.plot(x[0], x[1], "xr")
         if goal is not None:
             plt.plot(goal[0], goal[1], "xb")
-        plt.plot(ob[:, 0], ob[:, 1], "ok")
+        plt.plot(ob[:, 0], ob[:, 1], "ok",zorder=1)
+        plot_seg(seg)
         plot_robot(x[0], x[1], x[2], config)
         plot_arrow(x[0], x[1], x[2])
         plt.axis("equal")
         plt.grid(True)
         plt.pause(0.0001)
-
 
 
 def main(gx=10.0, gy=10.0):

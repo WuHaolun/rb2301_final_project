@@ -97,6 +97,8 @@ class ObstacleCourseNode(Node):
         self.tilt_threshold = 5 # in angular
         self.close_threshold = 0.5# how close to a deadend triggers transformation to the next _sub_goal
 
+        self._segmentation = []
+
         if is_simulation:
             self.max_translate_velocity = 0.5
         else:
@@ -229,6 +231,8 @@ class ObstacleCourseNode(Node):
             self.move_2D()
             return
 
+        self._segmentation = []
+        #Detect deadend_wall and change subgoal
         deadend_wall = self.deadend_detector()
         if deadend_wall is not None:
             distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
@@ -255,9 +259,10 @@ class ObstacleCourseNode(Node):
                                                                     )
         self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
         self._state[3] , self._state[4] = u[0], u[1]    #TODO change this to real speed
-        dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob)
+        dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
         ###### INSERT CODE HERE ######
+
     @staticmethod
     def measure_distance_dot_and_line(dot,line):
         A = line[0]
@@ -277,7 +282,7 @@ class ObstacleCourseNode(Node):
         if self.pose is None or self._ob.size == 0 or not self._sub_goal:
             return None
 
-        def check_segment(segment,farthest_dot):
+        def check_segment(segment:list[np.ndarray],farthest_dot):
             if len(segment) < self.check_list_threshold:
                 return None
 
@@ -299,6 +304,8 @@ class ObstacleCourseNode(Node):
             if distance < self.outlier_dot_threshold:
                 #self.get_logger().warn(f'infeasible wall!too short:distance:{distance}')
                 return None
+
+            self._segmentation.append(segment)  #add valid segment for animation
 
 
 
@@ -326,7 +333,7 @@ class ObstacleCourseNode(Node):
             if abs(angle_deg - 90.0) > self.tilt_threshold:
                 #self.get_logger().warn(f'infeasible wall!it is not in good angle')
                 return None
-
+            
             return (A,B,C)
 
         # Find the global extreme before accepting any candidate segment.
