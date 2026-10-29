@@ -14,9 +14,9 @@ workspace_directory = os.path.dirname(os.path.realpath(__file__))[:-20]
 overwrite_file = workspace_directory + '/rb2301_gz/worlds/obstacle_course_world_fp.sdf'
 original_file = workspace_directory + '/rb2301_gz/worlds/obstacle_course_world_fp_original.sdf'
 
-coke_model = '://rb2301_gz/meshes/coke/6'
-drawer_model = '://rb2301_gz/meshes/drawer/2'
-litterbin_model = '://rb2301_gz/meshes/litterbin/2'
+coke_model = 'package://rb2301_gz/meshes/coke/6'
+drawer_model = 'package://rb2301_gz/meshes/drawer/2'
+litterbin_model = 'package://rb2301_gz/meshes/litterbin/2'
 
 
 def add_element(x, y, n, element_model):

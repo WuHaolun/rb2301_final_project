@@ -37,8 +37,10 @@ class Config:
         self.dt = 0.1  # [s] Time tick for motion prediction
         self.predict_time = 2.5  # [s]
         self.to_goal_cost_gain = 0.10
+        self.to_goal_heading_cost_gain = 0.02
+
         self.speed_cost_gain = 0.9
-        self.obstacle_cost_gain = 0.05
+        self.obstacle_cost_gain = 0.03
         self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
         self.robot_type = RobotType.rectangle
 
@@ -80,13 +82,13 @@ class Config:
 
 config = Config()
 
-def dwa_control(x, goal, ob, config = config)-> tuple[list[float], np.ndarray]:
+def dwa_control(x,ob, goal=None,  goal_heading=None,config = config)-> tuple[list[float], np.ndarray]:
     """
     Dynamic Window Approach control
     """
     dw = calc_dynamic_window(x, config)
 
-    u, trajectory = calc_control_and_trajectory(x, dw, config, goal, ob)
+    u, trajectory = calc_control_and_trajectory(x, dw, config, goal, ob,goal_heading)
 
     return u, trajectory
 
@@ -131,7 +133,7 @@ def predict_trajectory(x_init, v, y, config):
     predict trajectory with an input
     """
 
-    x = np.array(x_init)
+    x = np.array(x_init, dtype=float)
     trajectory = np.array(x)
     time = 0
     while time <= config.predict_time:
@@ -142,11 +144,12 @@ def predict_trajectory(x_init, v, y, config):
     return trajectory
 
 
-def calc_control_and_trajectory(x, dw, config, goal, ob)->tuple[list[float], np.ndarray]:
+def calc_control_and_trajectory(x, dw, config, goal, ob,goal_heading)->tuple[list[float], np.ndarray]:
     """
     calculation final input with dynamic window
     """
-
+    if goal is not None and goal_heading is not None:
+        raise RuntimeError('cannot implement goal and goal_heading at the same time!')
     x_init = x[:]
     min_cost = float("inf")
     best_u = [0.0, 0.0]
@@ -158,14 +161,19 @@ def calc_control_and_trajectory(x, dw, config, goal, ob)->tuple[list[float], np.
 
             trajectory = predict_trajectory(x_init, v, y, config)
             # calc cost
-            to_goal_cost = config.to_goal_cost_gain * calc_to_goal_cost(trajectory, goal)
+            to_goal_cost = 0
+            if goal_heading is not None:
+                to_goal_cost = config.to_goal_heading_cost_gain * calc_to_goal_heading_cost(trajectory,goal_heading)
+            if goal is not None:
+                to_goal_cost = config.to_goal_cost_gain * calc_to_goal_cost(trajectory, goal)
+
             speed_cost = config.speed_cost_gain * (config.max_speed - trajectory[-1, 3])
             ob_cost = config.obstacle_cost_gain * calc_obstacle_cost(trajectory, ob, config)
 
             final_cost = to_goal_cost + speed_cost + ob_cost
 
             # search minimum trajectory
-            if min_cost >= final_cost:
+            if np.isfinite(final_cost) and min_cost >= final_cost:
                 min_cost = final_cost
                 best_u = [v, y]
                 best_trajectory = trajectory
@@ -183,6 +191,8 @@ def calc_obstacle_cost(trajectory, ob, config):
     """
     calc obstacle cost inf: collision
     """
+    if np.size(ob) == 0:
+        return 0.0
     ox = ob[:, 0]
     oy = ob[:, 1]
     dx = trajectory[:, 0] - ox[:, None]
@@ -194,8 +204,8 @@ def calc_obstacle_cost(trajectory, ob, config):
         rot = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
         rot = np.transpose(rot, [2, 0, 1])
         local_ob = ob[:, None] - trajectory[:, 0:2]
-        local_ob = local_ob.reshape(-1, local_ob.shape[-1])
-        local_ob = np.array([local_ob @ x for x in rot])
+        # Rotate each relative point using the heading at the same time step.
+        local_ob = np.einsum('oti,tij->otj', local_ob, rot)
         local_ob = local_ob.reshape(-1, local_ob.shape[-1])
         upper_check = local_ob[:, 0] <= config.robot_length / 2
         right_check = local_ob[:, 1] <= config.robot_width / 2
@@ -225,6 +235,21 @@ def calc_to_goal_cost(trajectory, goal):
 
     return cost
 
+def calc_to_goal_heading_cost(trajectory,goal_heading):
+    """
+        same as goal_cost calc but only use a single para
+    """
+    if goal_heading == '+x':
+        d = - trajectory[-1, 0]
+    elif goal_heading == '-x':
+        d = trajectory[-1, 0]
+    elif goal_heading == '+y':
+        d = - trajectory[-1,1]
+    elif goal_heading == '-y':
+        d= trajectory[-1,1]
+    else:
+        raise ValueError('goal_heading must be +x, -x, +y or -y')
+    return d
 
 def plot_arrow(x, y, yaw, length=0.5, width=0.1):  # pragma: no cover
     plt.arrow(x, y, length * math.cos(yaw), length * math.sin(yaw),
@@ -267,7 +292,8 @@ def animate(predicted_trajectory,x,goal,ob,config=config):
             lambda event: [exit(0) if event.key == 'escape' else None])
         plt.plot(predicted_trajectory[:, 0], predicted_trajectory[:, 1], "-g")
         plt.plot(x[0], x[1], "xr")
-        plt.plot(goal[0], goal[1], "xb")
+        if goal is not None:
+            plt.plot(goal[0], goal[1], "xb")
         plt.plot(ob[:, 0], ob[:, 1], "ok")
         plot_robot(x[0], x[1], x[2], config)
         plot_arrow(x[0], x[1], x[2])
@@ -290,7 +316,7 @@ def main(gx=10.0, gy=10.0):
     trajectory = np.array(x)
     ob = config.ob
     while True:
-        u, predicted_trajectory = dwa_control(x, config, goal, ob)
+        u, predicted_trajectory = dwa_control(x, ob, goal=goal, config=config)
         x = motion(x, u, config.dt)  # simulate robot
         trajectory = np.vstack((trajectory, x))  # store state history
 

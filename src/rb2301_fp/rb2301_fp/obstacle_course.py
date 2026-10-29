@@ -14,9 +14,8 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 
-
 np.set_printoptions(2, suppress=True, threshold=np.inf) # Print numpy arrays to specified d.p., suppress scientific notation and do not truncate
-set_logger_level("obstaclecourse", level=LoggingSeverity.INFO) # Configure to either LoggingSeverity.INFO or LoggingSeverity.DEBUG  
+set_logger_level("obstaclecourse", level=LoggingSeverity.INFO) # Configure to either LoggingSeverity.INFO or LoggingSeverity.DEBUG
 
 
 _PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -64,7 +63,7 @@ class LidarNode(Node):
 
     def sub_scan_callback(self, msg):
         """Scan subscriber"""
-        if len(msg.ranges) <= 360: 
+        if len(msg.ranges) <= 360:
             self.is_simulation = True
         else:
             self.is_simulation = False
@@ -82,16 +81,26 @@ class ObstacleCourseNode(Node):
         self._ticks = 0
 
         #DWA
-        self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])  #state representation
+        self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])  #state representation:
+        #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
+
+        self._sub_goal = ['+x','+y','+x']# sub_goal_heading, in reverse order
+
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
         self._is_dwa_initialized = False
 
+        self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
+        self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
+        self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
+        self.tilt_threshold = 5 # in angular
+        self.close_threshold = 0.5# how close to a deadend triggers transformation to the next _sub_goal
+
         if is_simulation:
-            self.max_translate_velocity = 1.4
+            self.max_translate_velocity = 0.5
         else:
-            self.max_translate_velocity = 0.3 # Please keep this in place; 0.3m/s is more than fast enough 
+            self.max_translate_velocity = 0.3 # Please keep this in place; 0.3m/s is more than fast enough
 
         self.sub_scan = self.create_subscription(LaserScan, "scan", self.sub_scan_callback, 2) # Subscribe to LiDAR scan data
 
@@ -106,14 +115,14 @@ class ObstacleCourseNode(Node):
             self.frame, self.course = load_frame(self.robot_number)
             self.get_logger().info(f"Reading pose from /vrpn_mocap/bingda_{self.robot_number:03d}/pose")
 
-            self.map_sub = self.create_subscription( 
+            self.map_sub = self.create_subscription(
                 PoseStamped,
                 f'/vrpn_mocap/bingda_{self.robot_number:03d}/pose',
-                self.optitrack_callback, 
+                self.optitrack_callback,
                 qos_profile
                 )
-            
-        self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10) # Publish to cmd_vel node       
+
+        self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10) # Publish to cmd_vel node
         self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
 
         self.pose = None
@@ -123,7 +132,7 @@ class ObstacleCourseNode(Node):
         if len(msg.ranges) <= 720:#was 360,choose whether want downsampling
             self.last_scan = np.array(msg.ranges)
         else:
-            self.last_scan = np.array(msg.ranges)[::2] 
+            self.last_scan = np.array(msg.ranges)[::2]
 
         self.update_ob(msg)
 
@@ -131,7 +140,7 @@ class ObstacleCourseNode(Node):
         if self.pose is None:
             return
         r = self.last_scan
-        step = 1
+        step = 2 if len(msg.ranges) > 720 else 1
         yaw = np.deg2rad(self.pose[2])
         # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
         a = msg.angle_min + np.arange(r.size) * msg.angle_increment * step + 3.1416 + yaw
@@ -164,7 +173,7 @@ class ObstacleCourseNode(Node):
     def odometer_callback(self, msg):
         '''Callback to calculate 2D pose info from Gazebo odomoter. Pose info includes x and y coordinates, as well as heading in degrees.
         This callback will run everytime the rclpy executor spins'''
-        latest_pose_msg = msg.pose.pose 
+        latest_pose_msg = msg.pose.pose
         heading = np.rad2deg(self.yaw_from_quaternion(latest_pose_msg.orientation))
         self.pose = np.array((latest_pose_msg.position.x, latest_pose_msg.position.y, heading))
         return self.pose
@@ -187,6 +196,7 @@ class ObstacleCourseNode(Node):
         return False
 
     def update_state(self)->np.ndarray:
+        """update speed and orientation using pose[], keep vel and omega"""
         return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self._state[3], self._state[4]])
 
 
@@ -200,30 +210,157 @@ class ObstacleCourseNode(Node):
             self._ticks += 1
             if self._ticks % 10 == 0: # twice a second
                 ox, oy, oh = self.raw_pose
-                self.get_logger().info(f"optitrack ({ox:+.3f}, {oy:+.3f}, {oh:+7.1f} deg)  ->  maze ({self.pose[0]:+.3f}, {self.pose[1]:+.3f}, {self.pose[2]:+7.1f} deg)")
+                #self.get_logger().info(f"optitrack ({ox:+.3f}, {oy:+.3f}, {oh:+7.1f} deg)  ->  maze ({self.pose[0]:+.3f}, {self.pose[1]:+.3f}, {self.pose[2]:+7.1f} deg)")
             return # Calibration mode: look, don't drive
 
         ###### INSERT CODE HERE ######
-        self.get_logger().info(f"Pose: {self.pose}")
+        #self.get_logger().info(f"Pose: {self.pose}")
 
         #try DWA integration
 
         #TODO give sub goal
 
-        #TODO 
+        #TODO
         if self.pose is None or self._ob.size == 0:
             return
         self._state = self.update_state()
+
+        if not self._sub_goal:
+            self.move_2D()
+            return
+
+        deadend_wall = self.deadend_detector()
+        if deadend_wall is not None:
+            distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
+            self.get_logger().info(f'wall detected!distance={distance_to_deadend_wall}')
+            if distance_to_deadend_wall <= self.close_threshold:
+                self._sub_goal.pop()
+
+                if not self._sub_goal:
+                    self.move_2D()
+                    self.get_logger().info('All sub-goals completed')
+                    return
+
+                self.get_logger().info(
+                    f'switch to the next _sub_goal!{self._sub_goal[-1]}'
+                )
+
+
         self._trajectory = np.vstack((self._trajectory, self._state))
-        u, predicted_trajectory = dynamic_window_approach.dwa_control(self._state,
-                                                                        self._goal, 
-                                                                        self._ob)
-        self.move_2D(u[0],0.0,u[1])
-        self._state[3] , self._state[4] = u[0], u[1]    #TODO change this to real speed 
+        u, predicted_trajectory = dynamic_window_approach.dwa_control(
+                                                                    x=self._state,
+                                                                    #goal=self._goal,
+                                                                    goal_heading= self._sub_goal[-1],
+                                                                    ob=self._ob
+                                                                    )
+        self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
+        self._state[3] , self._state[4] = u[0], u[1]    #TODO change this to real speed
         dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob)
 
         ###### INSERT CODE HERE ######
-                
+    @staticmethod
+    def measure_distance_dot_and_line(dot,line):
+        A = line[0]
+        B = line[1]
+        C = line[2]
+        _dot = np.asarray(dot)[:2]
+        norm = np.hypot(A, B)
+        if norm == 0:
+            raise ValueError('A and B cannot both be zero')
+        return float(np.abs(_dot @ np.array([A, B]) + C) / norm)
+
+    def deadend_detector(self):
+        """
+        利用ob数组有序的性质,检测阻挡子目标的那堵墙
+        """
+        last_dot = None
+        if self.pose is None or self._ob.size == 0 or not self._sub_goal:
+            return None
+
+        def check_segment(segment,farthest_dot):
+            if len(segment) < self.check_list_threshold:
+                return None
+
+            points = np.asarray(segment, dtype=float)
+            center = points.mean(axis=0)
+            centered = points - center
+
+            _, s, vh = np.linalg.svd(centered, full_matrices=False)
+            # 第一主方向沿着墙，第二主方向垂直于墙
+            # vh[0]点云延伸最明显的方向,vh[1]法线方向
+            #s[0]点云沿第1个方向的分散程度
+            if s[0] < 1e-8:
+                return None
+
+            A, B = vh[1]  # 单位法向量，A²+B²=1
+            C = -np.dot([A, B], center)
+
+            distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
+            if distance < self.outlier_dot_threshold:
+                #self.get_logger().warn(f'infeasible wall!too short:distance:{distance}')
+                return None
+
+
+
+            goal_direction = {
+                '+x': (1, 0), '-x': (-1, 0),
+                '+y': (0, 1), '-y': (0, -1),
+            }[self._sub_goal[-1]]
+            normal = np.array([A, B])
+            # Reject a wall behind the robot along the current goal direction.
+            robot_side = normal @ self.pose[:2] + C
+            if robot_side * np.dot(normal, goal_direction) > 0:
+                #self.get_logger().warn(f'infeasible wall!it is behind the robot')
+                return None
+
+            vector_1 = vh[0]
+            if self._sub_goal[-1] == '+x' or self._sub_goal[-1]=='-x':
+                vector_2 = np.array([1,0])
+            else:
+                vector_2 = np.array([0,1])
+
+            norm_product = np.linalg.norm(vector_1) * np.linalg.norm(vector_2)
+            cos_theta = np.dot(vector_1, vector_2) / norm_product
+            angle_deg = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+            # A blocking wall is perpendicular to travel; SVD signs are arbitrary.
+            if abs(angle_deg - 90.0) > self.tilt_threshold:
+                #self.get_logger().warn(f'infeasible wall!it is not in good angle')
+                return None
+
+            return (A,B,C)
+
+        # Find the global extreme before accepting any candidate segment.
+        farthest_dot=self.pose[:2]
+        for dot in self._ob:
+            if self._sub_goal[-1] == '+x':# update the farthest dot
+                if dot[0]>farthest_dot[0]:
+                    farthest_dot = dot
+            elif self._sub_goal[-1] == '-x':
+                if dot[0]<farthest_dot[0]:
+                    farthest_dot = dot
+            elif self._sub_goal[-1] == '+y':
+                if dot[1]>farthest_dot[1]:
+                    farthest_dot = dot
+            elif self._sub_goal[-1] == '-y':
+                if dot[1]<farthest_dot[1]:
+                    farthest_dot = dot
+            else:
+                raise ValueError('_sub_goal should only contain "+x","-x","+y"or"-y"')
+
+        continuous_list=[]
+        for dot in self._ob:
+            if last_dot is not None:
+                distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
+
+            if (last_dot is not None and distance > self.density_threshold):#once the continuous list fracture or reaches the end
+                result = check_segment(continuous_list,farthest_dot)
+                if result is not None:
+                    return result
+                continuous_list=[dot]
+            else:
+                continuous_list.append(dot)
+            last_dot = dot
+        return check_segment(continuous_list,farthest_dot)
 
 def main(args=None):
     arg_parser = argparse.ArgumentParser(description="RB2301 final project")
