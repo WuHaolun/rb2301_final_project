@@ -83,7 +83,7 @@ class ObstacleCourseNode(Node):
 
         #DWA
         self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])
-        self._goal = np.array([10.0, 0.0])
+        self._goal = np.array([5.0, 0.0])
         self._trajectory = np.array(self._state)
         self._ob = np.array([])
         self._is_dwa_initialized = False
@@ -131,7 +131,7 @@ class ObstacleCourseNode(Node):
         if self.pose is None:
             return
         r = self.last_scan
-        step = 1 if r.size == len(msg.ranges) else 2
+        step = 1
         yaw = np.deg2rad(self.pose[2])
         # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
         a = msg.angle_min + np.arange(r.size) * msg.angle_increment * step + 3.1416 + yaw
