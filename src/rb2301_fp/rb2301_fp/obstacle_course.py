@@ -83,7 +83,7 @@ class ObstacleCourseNode(Node):
 
         #DWA
         self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])
-        self._goal = np.array([5.0, 0.0])
+        self._goal = np.array([5.0, -3.0])
         self._trajectory = np.array(self._state)
         self._ob = np.array([])
         self._is_dwa_initialized = False
@@ -211,6 +211,8 @@ class ObstacleCourseNode(Node):
         #TODO give sub goal
 
         #TODO 
+        if self.pose is None or self._ob.size == 0:
+            return
         self._state = self.update_state()
         self._trajectory = np.vstack((self._trajectory, self._state))
         u, predicted_trajectory = dynamic_window_approach.dwa_control(self._state,
