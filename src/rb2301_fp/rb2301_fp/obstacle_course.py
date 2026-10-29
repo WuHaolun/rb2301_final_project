@@ -82,10 +82,10 @@ class ObstacleCourseNode(Node):
         self._ticks = 0
 
         #DWA
-        self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])
-        self._goal = np.array([5.0, -3.0])
+        self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])  #state representation
+        self._goal = np.array([5.0, 0.0])
         self._trajectory = np.array(self._state)
-        self._ob = np.array([])
+        self._ob = np.array([]) #obstacle array
         self._is_dwa_initialized = False
 
         if is_simulation:

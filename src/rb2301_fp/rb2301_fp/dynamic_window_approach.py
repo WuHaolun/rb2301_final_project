@@ -31,12 +31,12 @@ class Config:
         self.min_speed = -0.1  # [m/s]
         self.max_yaw_rate = 90.0 * math.pi / 180.0  # [rad/s]
         self.max_accel = 0.2  # [m/ss]
-        self.max_delta_yaw_rate = 45.0 * math.pi / 180.0  # [rad/ss]
+        self.max_delta_yaw_rate = 90.0 * math.pi / 180.0  # [rad/ss]
         self.v_resolution = 0.02  # [m/s]
-        self.yaw_rate_resolution = 0.2 * math.pi / 180.0  # [rad/s]
+        self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
         self.dt = 0.1  # [s] Time tick for motion prediction
-        self.predict_time = 3.0  # [s]
-        self.to_goal_cost_gain = 0.15
+        self.predict_time = 2.5  # [s]
+        self.to_goal_cost_gain = 0.10
         self.speed_cost_gain = 0.9
         self.obstacle_cost_gain = 0.05
         self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
@@ -175,7 +175,7 @@ def calc_control_and_trajectory(x, dw, config, goal, ob)->tuple[list[float], np.
                     # best v=0 m/s (in front of an obstacle) and
                     # best omega=0 rad/s (heading to the goal with
                     # angle difference of 0)
-                    best_u[1] = (-1) ** np.random.randint(1,3) * config.max_delta_yaw_rate /1.5
+                    best_u[1] = (-1) ** np.random.randint(1,2) * config.max_delta_yaw_rate /1.5
     return best_u, best_trajectory
 
 
