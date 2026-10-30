@@ -90,7 +90,7 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
 
-        self._sub_goal = ['-x','+y']# sub_goal_heading, in reverse order
+        self._sub_goal = ['+x','+y']# sub_goal_heading, in reverse order
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
@@ -266,27 +266,27 @@ class ObstacleCourseNode(Node):
 
         self._segmentation = []
 
-        if self.timer_callback_counter % self.deadend_check_gap == 0:
-            self.timer_callback_counter = 0
+        # if self.timer_callback_counter % self.deadend_check_gap == 0:
+        #     self.timer_callback_counter = 0
 
-            #Detect deadend_wall and change subgoal
-            deadend_wall = self.deadend_detector()
-            if deadend_wall is not None:
-                distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
-                self.get_logger().info(f'wall detected!distance={distance_to_deadend_wall}')
-                if distance_to_deadend_wall <= self.close_threshold and time.monotonic()>=self.timestamp+self.sub_goal_cd:
-                    self._sub_goal.pop()
-                    self.timestamp = time.monotonic()
-                    if not self._sub_goal:
-                        self.move_2D()
-                        self.get_logger().info('All sub-goals completed')
-                        return
+        #     #Detect deadend_wall and change subgoal
+        #     deadend_wall = self.deadend_detector()
+        #     if deadend_wall is not None:
+        #         distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
+        #         self.get_logger().info(f'wall detected!distance={distance_to_deadend_wall}')
+        #         if distance_to_deadend_wall <= self.close_threshold and time.monotonic()>=self.timestamp+self.sub_goal_cd:
+        #             self._sub_goal.pop()
+        #             self.timestamp = time.monotonic()
+        #             if not self._sub_goal:
+        #                 self.move_2D()
+        #                 self.get_logger().info('All sub-goals completed')
+        #                 return
 
-                    self.get_logger().info(
-                        f'switch to the next _sub_goal!{self._sub_goal[-1]}'
-                    )
-        else:
-            self.timer_callback_counter+=1
+        #             self.get_logger().info(
+        #                 f'switch to the next _sub_goal!{self._sub_goal[-1]}'
+        #             )
+        # else:
+        #     self.timer_callback_counter+=1
 
 
         self._trajectory = np.vstack((self._trajectory, self._state))
