@@ -41,7 +41,7 @@ class Config:
         self.to_goal_heading_cost_gain = 0.002
 
         self.speed_cost_gain = 0.9
-        self.obstacle_cost_gain = 0.05
+        self.obstacle_cost_gain = 0.1
         self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
         self.robot_type = RobotType.rectangle
 
