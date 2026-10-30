@@ -90,7 +90,7 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
 
-        self._sub_goal = ['+x','-y','+x']# sub_goal_heading, in reverse order
+        self._sub_goal = ['-x','+y']# sub_goal_heading, in reverse order
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
