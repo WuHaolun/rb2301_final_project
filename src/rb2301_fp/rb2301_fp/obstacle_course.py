@@ -89,7 +89,7 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
 
-        self._sub_goal = ['+x','+y','+x']# sub_goal_heading, in reverse order
+        self._sub_goal = ['+x','-y','+x']# sub_goal_heading, in reverse order
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
@@ -253,7 +253,7 @@ class ObstacleCourseNode(Node):
         #TODO give sub goal
 
         #TODO
-        if self.pose is None or self._ob.size or self.actual_velocity is None:
+        if self.pose is None or self._ob.size == 0 or self.actual_velocity is None:
             return
         self._state = self.update_state()
 
