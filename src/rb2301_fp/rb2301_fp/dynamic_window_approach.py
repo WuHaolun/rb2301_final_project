@@ -100,7 +100,7 @@ class Config:
 
 config = Config()
 
-def dwa_control(x,ob, goal=None,  goal_heading=None,config = config)-> tuple[list[float], np.ndarray]:
+def dwa_control(x,ob, goal=None,  goal_heading=None,config = config):
     """
     Dynamic Window Approach control
     """
