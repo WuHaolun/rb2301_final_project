@@ -266,7 +266,7 @@ class ObstacleCourseNode(Node):
 
         self._segmentation = []
 
-        if self.timer_callback_counter % self.deadend_check_gap:
+        if self.timer_callback_counter % self.deadend_check_gap == 0:
             self.timer_callback_counter = 0
 
             #Detect deadend_wall and change subgoal
