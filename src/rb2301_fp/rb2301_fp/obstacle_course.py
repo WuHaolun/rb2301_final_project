@@ -105,8 +105,8 @@ class ObstacleCourseNode(Node):
         self.sub_goal_cd =1.0# sub_goal switch cooldown,in seconds
         self.timestamp = 0.0
         self._segmentation = []
-        self.deadend_check_gap = 20# how many times the timercallback run required for deadend check once
-        self.timer_callback_counter = 0
+        self.deadend_check_gap = 10# how many times the timercallback run required for deadend check once
+        self.timer_callback_counter = 1
 
         if is_simulation:
             self.max_translate_velocity = 0.5
@@ -267,8 +267,8 @@ class ObstacleCourseNode(Node):
         self._segmentation = []
 
         if self.timer_callback_counter % self.deadend_check_gap == 0:
-            self.timer_callback_counter = 0
-
+            self.timer_callback_counter = 1
+            self.get_logger().info('deadend check!')
             #Detect deadend_wall and change subgoal
             deadend_wall = self.deadend_detector()
             if deadend_wall is not None:
