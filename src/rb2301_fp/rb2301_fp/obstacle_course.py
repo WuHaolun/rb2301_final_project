@@ -266,27 +266,27 @@ class ObstacleCourseNode(Node):
 
         self._segmentation = []
 
-        # if self.timer_callback_counter % self.deadend_check_gap == 0:
-        #     self.timer_callback_counter = 0
+        if self.timer_callback_counter % self.deadend_check_gap == 0:
+            self.timer_callback_counter = 0
 
-        #     #Detect deadend_wall and change subgoal
-        #     deadend_wall = self.deadend_detector()
-        #     if deadend_wall is not None:
-        #         distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
-        #         self.get_logger().info(f'wall detected!distance={distance_to_deadend_wall}')
-        #         if distance_to_deadend_wall <= self.close_threshold and time.monotonic()>=self.timestamp+self.sub_goal_cd:
-        #             self._sub_goal.pop()
-        #             self.timestamp = time.monotonic()
-        #             if not self._sub_goal:
-        #                 self.move_2D()
-        #                 self.get_logger().info('All sub-goals completed')
-        #                 return
+            #Detect deadend_wall and change subgoal
+            deadend_wall = self.deadend_detector()
+            if deadend_wall is not None:
+                distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
+                self.get_logger().info(f'wall detected!distance={distance_to_deadend_wall}')
+                if distance_to_deadend_wall <= self.close_threshold and time.monotonic()>=self.timestamp+self.sub_goal_cd:
+                    self._sub_goal.pop()
+                    self.timestamp = time.monotonic()
+                    if not self._sub_goal:
+                        self.move_2D()
+                        self.get_logger().info('All sub-goals completed')
+                        return
 
-        #             self.get_logger().info(
-        #                 f'switch to the next _sub_goal!{self._sub_goal[-1]}'
-        #             )
-        # else:
-        #     self.timer_callback_counter+=1
+                    self.get_logger().info(
+                        f'switch to the next _sub_goal!{self._sub_goal[-1]}'
+                    )
+        else:
+            self.timer_callback_counter+=1
 
 
         self._trajectory = np.vstack((self._trajectory, self._state))
@@ -297,7 +297,7 @@ class ObstacleCourseNode(Node):
                                                                     ob=self._ob
                                                                     )
         self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
-        self._state[3] , self._state[4] = self.actual_velocity[0], self.actual_velocity[1]    #TODO change this to real speed
+        self._state[3] , self._state[4] = u[0], self.actual_velocity[1]    #TODO change this to real speed
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
         ###### INSERT CODE HERE ######
