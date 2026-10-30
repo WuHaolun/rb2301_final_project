@@ -90,8 +90,10 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
 
-        self._sub_goal = ['+x','-y','+x']# sub_goal_heading, in reverse order
-
+        if is_simulation:
+            self._sub_goal = ['-y','+x']# sub_goal_heading, in reverse order
+        else:
+            self._sub_goal = ['+x','+y']
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
         self._is_dwa_initialized = False
@@ -249,7 +251,7 @@ class ObstacleCourseNode(Node):
             return # Calibration mode: look, don't drive
 
         ###### INSERT CODE HERE ######
-        self.get_logger().info(f"Pose: {self.pose}")
+        #self.get_logger().info(f"Pose: {self.pose}")
 
         #try DWA integration
 
@@ -268,7 +270,7 @@ class ObstacleCourseNode(Node):
 
         if self.timer_callback_counter % self.deadend_check_gap == 0:
             self.timer_callback_counter = 1
-            self.get_logger().info('deadend check!')
+            #self.get_logger().info('deadend check!')
             #Detect deadend_wall and change subgoal
             deadend_wall = self.deadend_detector()
             if deadend_wall is not None:
@@ -281,10 +283,9 @@ class ObstacleCourseNode(Node):
                         self.move_2D()
                         self.get_logger().info('All sub-goals completed')
                         return
+                    else:
+                        self.get_logger().info(f'switch to the next _sub_goal!{self._sub_goal[-1]}')
 
-                    self.get_logger().info(
-                        f'switch to the next _sub_goal!{self._sub_goal[-1]}'
-                    )
         else:
             self.timer_callback_counter+=1
 
