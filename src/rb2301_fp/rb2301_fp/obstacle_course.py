@@ -165,6 +165,7 @@ class ObstacleCourseNode(Node):
         self.raw_pose = np.array((x,y,heading))
         x, y, heading = optitrack_to_maze(x, y, heading, self.frame) # CA2 maze frame, see optitrack_variables.config
         self.pose = np.array((x,y,heading))
+        self.update_actual_velocity(msg.header.stamp)
         return self.pose
 
     def to_course(self, pose=None):
@@ -201,6 +202,28 @@ class ObstacleCourseNode(Node):
         """update speed and orientation using pose[], keep vel and omega"""
         return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self._state[3], self._state[4]])
 
+    def update_actual_velocity(self, stamp):
+        """use differentiation of position to estimate the forward speed(m/s) and angular speed(rad/s)"""
+        timestamp = stamp.sec + stamp.nanosec * 1e-9
+        if self.last_timestamp is not None:
+            dt = timestamp - self.last_timestamp
+            if dt == 0:
+                return  
+            if dt < 0:
+                self.actual_velocity = None
+                self.filtered_forward_velocity = None
+            else:
+                dx, dy = self.pose[:2] - self.last_pose[:2]
+                yaw = math.radians(self.pose[2])
+                previous_yaw = math.radians(self.last_pose[2])
+                delta_yaw = math.atan2(math.sin(yaw - previous_yaw),
+                                       math.cos(yaw - previous_yaw))
+                midpoint_yaw = previous_yaw + delta_yaw / 2
+                v = (dx * math.cos(midpoint_yaw) + dy * math.sin(midpoint_yaw)) / dt
+                self.actual_velocity = (v, delta_yaw / dt)
+        self.last_pose = self.pose.copy()
+        self.last_timestamp = timestamp
+
 
     def timer_callback(self):
         """Controller loop. Insert path planning and PID control logic here"""
@@ -223,7 +246,7 @@ class ObstacleCourseNode(Node):
         #TODO give sub goal
 
         #TODO
-        if self.pose is None or self._ob.size == 0:
+        if self.pose is None or self._ob.size or self.actual_velocity is None:
             return
         self._state = self.update_state()
 
@@ -258,7 +281,7 @@ class ObstacleCourseNode(Node):
                                                                     ob=self._ob
                                                                     )
         self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
-        self._state[3] , self._state[4] = u[0], u[1]    #TODO change this to real speed
+        self._state[3] , self._state[4] = self.actual_velocity[0], self.actual_velocity[1]    #TODO change this to real speed
         dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
         ###### INSERT CODE HERE ######
