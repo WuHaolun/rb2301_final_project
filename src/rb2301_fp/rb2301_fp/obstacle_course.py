@@ -339,7 +339,7 @@ class ObstacleCourseNode(Node):
             distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
             self._segmentation.append(segment)  #add valid segment for animation  
 
-            if distance < self.outlier_dot_threshold:
+            if distance > self.outlier_dot_threshold:
                 #self.get_logger().warn(f'infeasible wall!too short:distance:{distance}')
                 return None
 
