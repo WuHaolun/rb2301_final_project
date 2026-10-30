@@ -358,8 +358,6 @@ class ObstacleCourseNode(Node):
                 raise ValueError('_sub_goal should only contain "+x","-x","+y"or"-y"')
 
         continuous_list=[]
-        last_trend = None
-        trend = None
         aver_hist_vector = None
         fracture = False
         for dot in double_ob:
