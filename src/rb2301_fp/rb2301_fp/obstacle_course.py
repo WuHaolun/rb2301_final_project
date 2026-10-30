@@ -5,6 +5,7 @@ import os
 import time
 import numpy as np
 import rclpy
+from typing import List, Tuple
 from rb2301_fp import dynamic_window_approach
 
 from rclpy.node import Node
@@ -89,7 +90,7 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
 
-        self._sub_goal = ['+x','-y','+x']# sub_goal_heading, in reverse order
+        self._sub_goal = ['+x','+y']# sub_goal_heading, in reverse order
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
@@ -246,7 +247,7 @@ class ObstacleCourseNode(Node):
             return # Calibration mode: look, don't drive
 
         ###### INSERT CODE HERE ######
-        #self.get_logger().info(f"Pose: {self.pose}")
+        self.get_logger().info(f"Pose: {self.pose}")
 
         #try DWA integration
 
@@ -289,7 +290,7 @@ class ObstacleCourseNode(Node):
                                                                     )
         self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
         self._state[3] , self._state[4] = self.actual_velocity[0], self.actual_velocity[1]    #TODO change this to real speed
-        dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
+        #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
         ###### INSERT CODE HERE ######
 
@@ -318,7 +319,7 @@ class ObstacleCourseNode(Node):
         if self.pose is None or self._ob.size == 0 or not self._sub_goal:
             return None
 
-        def check_segment(segment:list[np.ndarray],farthest_dot):
+        def check_segment(segment,farthest_dot):
             if len(segment) < self.check_list_threshold:
                 return None
 

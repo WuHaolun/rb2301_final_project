@@ -5,7 +5,7 @@ Mobile robot motion planning sample with Dynamic Window Approach
 author: Atsushi Sakai (@Atsushi_twi), Göktuğ Karakaşlı
 
 """
-
+from typing import List, Tuple
 import math
 from enum import Enum
 
@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 show_animation = True
-is_simulation = True
+is_simulation = False
 
 
 class RobotType(Enum):
@@ -69,10 +69,10 @@ class Config:
             self.predict_time = 2.5  # [s]
 
             self.to_goal_cost_gain = 0.10
-            self.to_goal_heading_cost_gain = 0.02
+            self.to_goal_heading_cost_gain = 0.2
 
             self.speed_cost_gain = 0.9
-            self.obstacle_cost_gain = 0.05
+            self.obstacle_cost_gain = 0.005
             self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
 
@@ -162,7 +162,7 @@ def predict_trajectory(x_init, v, y, config):
     return trajectory
 
 
-def calc_control_and_trajectory(x, dw, config, goal, ob,goal_heading)->tuple[list[float], np.ndarray]:
+def calc_control_and_trajectory(x, dw, config, goal, ob,goal_heading):
     """
     calculation final input with dynamic window
     """
