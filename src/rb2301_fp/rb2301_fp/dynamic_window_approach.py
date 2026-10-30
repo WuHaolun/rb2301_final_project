@@ -38,10 +38,10 @@ class Config:
         self.predict_time = 2.5  # [s]
 
         self.to_goal_cost_gain = 0.10
-        self.to_goal_heading_cost_gain = 0.002
+        self.to_goal_heading_cost_gain = 0.01
 
         self.speed_cost_gain = 0.9
-        self.obstacle_cost_gain = 0.1
+        self.obstacle_cost_gain = 0.05
         self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
         self.robot_type = RobotType.rectangle
 
