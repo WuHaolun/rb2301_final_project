@@ -2,6 +2,7 @@ import argparse
 import configparser
 import math
 import os
+import time
 import numpy as np
 import rclpy
 from rb2301_fp import dynamic_window_approach
@@ -93,10 +94,12 @@ class ObstacleCourseNode(Node):
 
         self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
         self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
-        self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
+        self.outlier_dot_threshold = 0.05 # The distance from the point with the outlier dot to the fitted line
         self.tilt_threshold = 5 # in angular
-        self.close_threshold = 0.5# how close to a deadend triggers transformation to the next _sub_goal
+        self.close_threshold = 0.7# how close to a deadend triggers transformation to the next _sub_goal
         self.curve_threshold = 20# 
+        self.sub_goal_cd =1.0# sub_goal switch cooldown,in seconds
+        self.timestamp = 0.0
         self._segmentation = []
 
         if is_simulation:
@@ -260,9 +263,9 @@ class ObstacleCourseNode(Node):
         if deadend_wall is not None:
             distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
             self.get_logger().info(f'wall detected!distance={distance_to_deadend_wall}')
-            if distance_to_deadend_wall <= self.close_threshold:
+            if distance_to_deadend_wall <= self.close_threshold and time.monotonic()>=self.timestamp+self.sub_goal_cd:
                 self._sub_goal.pop()
-
+                self.timestamp = time.monotonic()
                 if not self._sub_goal:
                     self.move_2D()
                     self.get_logger().info('All sub-goals completed')
@@ -331,6 +334,7 @@ class ObstacleCourseNode(Node):
 
             distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
             self._segmentation.append(segment)  #add valid segment for animation  
+
             if distance < self.outlier_dot_threshold:
                 #self.get_logger().warn(f'infeasible wall!too short:distance:{distance}')
                 return None
@@ -406,7 +410,6 @@ class ObstacleCourseNode(Node):
             else:
                 continuous_list.append(dot)
             last_dot = dot
-            last_trend = trend
         return check_segment(continuous_list,farthest_dot)
 
 def main(args=None):
