@@ -96,7 +96,7 @@ class ObstacleCourseNode(Node):
         self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
         self.tilt_threshold = 5 # in angular
         self.close_threshold = 0.5# how close to a deadend triggers transformation to the next _sub_goal
-
+        self.curve_threshold = 20# 
         self._segmentation = []
 
         if is_simulation:
@@ -274,6 +274,12 @@ class ObstacleCourseNode(Node):
             raise ValueError('A and B cannot both be zero')
         return float(np.abs(_dot @ np.array([A, B]) + C) / norm)
 
+    @staticmethod
+    def measure_angle(vector_1,vector_2):
+            norm_product = np.linalg.norm(vector_1) * np.linalg.norm(vector_2)
+            cos_theta = np.dot(vector_1, vector_2) / norm_product
+            angle_deg = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+            return angle_deg
     def deadend_detector(self):
         """
         利用ob数组有序的性质,检测阻挡子目标的那堵墙
@@ -323,9 +329,7 @@ class ObstacleCourseNode(Node):
             else:
                 vector_2 = np.array([0,1])
 
-            norm_product = np.linalg.norm(vector_1) * np.linalg.norm(vector_2)
-            cos_theta = np.dot(vector_1, vector_2) / norm_product
-            angle_deg = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+            angle_deg = self.measure_angle(vector_1,vector_2)
             # A blocking wall is perpendicular to travel; SVD signs are arbitrary.
             if abs(angle_deg - 90.0) > self.tilt_threshold:
                 #self.get_logger().warn(f'infeasible wall!it is not in good angle')
@@ -356,16 +360,24 @@ class ObstacleCourseNode(Node):
         continuous_list=[]
         last_trend = None
         trend = None
+        aver_hist_vector = None
+        fracture = False
         for dot in double_ob:
             if last_dot is not None:
                 distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
 
-                if abs(last_dot[0]-dot[0]) > abs(last_dot[1]-dot[1]):
-                    trend = 'x'
-                else:
-                    trend = 'y'
-
-            if (last_dot is not None and distance > self.density_threshold) or (last_trend is not None and trend != last_trend):  #once the continuous list fracture or reaches the end
+                new_vector = np.asarray(last_dot)-np.asarray(dot)
+                if aver_hist_vector is None and last_dot is not None:
+                    aver_hist_vector = np.asarray(last_dot)-np.asarray(dot)
+                if aver_hist_vector is not None:
+                    angle = self.measure_angle(new_vector,aver_hist_vector)
+                    if angle < self.curve_threshold:
+                        aver_hist_vector= (aver_hist_vector+new_vector)/2
+                        fracture = False
+                    else:
+                        fracture = True
+                        aver_hist_vector = new_vector
+            if (last_dot is not None and distance > self.density_threshold) or (aver_hist_vector is not None and fracture == True):  #once the continuous list fracture or reaches the end
                 result = check_segment(continuous_list,farthest_dot)
                 if result is not None:
                     return result
