@@ -301,13 +301,10 @@ class ObstacleCourseNode(Node):
             C = -np.dot([A, B], center)
 
             distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
+            self._segmentation.append(segment)  #add valid segment for animation  
             if distance < self.outlier_dot_threshold:
                 #self.get_logger().warn(f'infeasible wall!too short:distance:{distance}')
                 return None
-
-            self._segmentation.append(segment)  #add valid segment for animation
-
-
 
             goal_direction = {
                 '+x': (1, 0), '-x': (-1, 0),
@@ -339,7 +336,8 @@ class ObstacleCourseNode(Node):
         # Find the global extreme before accepting any candidate segment.
         farthest_dot=self.pose[:2]
         last_dot = None
-        for dot in self._ob:
+        double_ob = np.concatenate((self._ob, self._ob), axis=0)
+        for dot in double_ob:
             if self._sub_goal[-1] == '+x':# update the farthest dot
                 if dot[0]>farthest_dot[0]:
                     farthest_dot = dot
@@ -358,7 +356,7 @@ class ObstacleCourseNode(Node):
         continuous_list=[]
         last_trend = None
         trend = None
-        for dot in self._ob:
+        for dot in double_ob:
             if last_dot is not None:
                 distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
 

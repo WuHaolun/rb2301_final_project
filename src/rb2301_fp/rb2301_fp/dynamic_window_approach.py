@@ -38,7 +38,7 @@ class Config:
         self.predict_time = 2.5  # [s]
 
         self.to_goal_cost_gain = 0.10
-        self.to_goal_heading_cost_gain = 0.02
+        self.to_goal_heading_cost_gain = 0.002
 
         self.speed_cost_gain = 0.9
         self.obstacle_cost_gain = 0.1
@@ -276,7 +276,7 @@ def plot_seg(seg):
         color = rng.random(3)         
 
         plt.scatter(points[:, 0], points[:, 1], color=color,s=20, zorder=3)
-        print("ppp")
+        #print("ppp")
 
 
 def animate(predicted_trajectory,x,goal,ob,seg,config=config):
