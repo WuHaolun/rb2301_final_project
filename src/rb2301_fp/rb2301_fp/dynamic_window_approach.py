@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 show_animation = True
+is_simulation = True
 
 
 class RobotType(Enum):
@@ -26,33 +27,65 @@ class Config:
     """
 
     def __init__(self):
-        # robot parameter
-        self.max_speed = 0.4  # [m/s]
-        self.min_speed = -0.1  # [m/s]
-        self.max_yaw_rate = 90.0 * math.pi / 180.0  # [rad/s]
-        self.max_accel = 0.2  # [m/ss]
-        self.max_delta_yaw_rate = 90.0 * math.pi / 180.0  # [rad/ss]
-        self.v_resolution = 0.02  # [m/s]
-        self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
-        self.dt = 0.1  # [s] Time tick for motion prediction
-        self.predict_time = 2.5  # [s]
+        if is_simulation:
+            # robot parameter
+            self.max_speed = 0.4  # [m/s]
+            self.min_speed = -0.1  # [m/s]
+            self.max_yaw_rate = 90.0 * math.pi / 180.0  # [rad/s]
+            self.max_accel = 0.2  # [m/ss]
+            self.max_delta_yaw_rate = 90.0 * math.pi / 180.0  # [rad/ss]
+            self.v_resolution = 0.02  # [m/s]
+            self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
+            self.dt = 0.1  # [s] Time tick for motion prediction
+            self.predict_time = 2.5  # [s]
 
-        self.to_goal_cost_gain = 0.10
-        self.to_goal_heading_cost_gain = 0.02
+            self.to_goal_cost_gain = 0.10
+            self.to_goal_heading_cost_gain = 0.02
 
-        self.speed_cost_gain = 0.9
-        self.obstacle_cost_gain = 0.05
-        self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
-        self.robot_type = RobotType.rectangle
+            self.speed_cost_gain = 0.9
+            self.obstacle_cost_gain = 0.05
+            self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
+            self.robot_type = RobotType.rectangle
 
-        # if robot_type == RobotType.circle
-        # Also used to check if goal is reached in both types
-        self.robot_radius = 1.0  # [m] for collision check
+            # if robot_type == RobotType.circle
+            # Also used to check if goal is reached in both types
+            self.robot_radius = 1.0  # [m] for collision check
 
-        # if robot_type == RobotType.rectangle
-        self.robot_width = 0.2  # [m] for collision check
-        self.robot_length = 0.2  # [m] for collision check
-        # obstacles [x(m) y(m), ....]
+            # if robot_type == RobotType.rectangle
+            self.robot_width = 0.2  # [m] for collision check
+            self.robot_length = 0.2  # [m] for collision check
+            # obstacles [x(m) y(m), ....]
+        
+        else:   #IRL param
+                        # robot parameter
+            self.max_speed = 0.3  # [m/s]
+            self.min_speed = -0.1  # [m/s]
+            self.max_yaw_rate = 90.0 * math.pi / 180.0  # [rad/s]
+            self.max_accel = 0.2  # [m/ss]
+            self.max_delta_yaw_rate = 90.0 * math.pi / 180.0  # [rad/ss]
+            self.v_resolution = 0.02  # [m/s]
+            self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
+            self.dt = 0.1  # [s] Time tick for motion prediction
+            self.predict_time = 2.5  # [s]
+
+            self.to_goal_cost_gain = 0.10
+            self.to_goal_heading_cost_gain = 0.02
+
+            self.speed_cost_gain = 0.9
+            self.obstacle_cost_gain = 0.05
+            self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
+            self.robot_type = RobotType.rectangle
+
+            # if robot_type == RobotType.circle
+            # Also used to check if goal is reached in both types
+            self.robot_radius = 1.0  # [m] for collision check
+
+            # if robot_type == RobotType.rectangle
+            self.robot_width = 0.2  # [m] for collision check
+            self.robot_length = 0.23  # [m] for collision check
+            # obstacles [x(m) y(m), ....]
+
+
 
     @property
     def robot_type(self):
