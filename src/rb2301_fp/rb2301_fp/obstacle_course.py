@@ -81,6 +81,9 @@ class ObstacleCourseNode(Node):
         self.frame = self.course = None
         self._ticks = 0
 
+        self.actual_velocity = None
+        self.last_timestamp = None
+
         #DWA
         self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])  #state representation:
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
@@ -182,6 +185,7 @@ class ObstacleCourseNode(Node):
         latest_pose_msg = msg.pose.pose
         heading = np.rad2deg(self.yaw_from_quaternion(latest_pose_msg.orientation))
         self.pose = np.array((latest_pose_msg.position.x, latest_pose_msg.position.y, heading))
+        self.update_actual_velocity(msg.header.stamp)
         return self.pose
 
     def move_2D(self, x:float=0.0, y:float=0.0, turn:float=0.0):
