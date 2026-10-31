@@ -26,7 +26,7 @@ class Config:
     simulation parameter class
     """
 
-    def __init__(self):
+    def __init__(self, is_simulation=True):
         if is_simulation:
             # robot parameter
             self.max_speed = 0.4  # [m/s]

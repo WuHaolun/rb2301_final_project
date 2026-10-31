@@ -78,6 +78,7 @@ class ObstacleCourseNode(Node):
         self.get_logger().info("Starting ObstacleCourseNode")
 
         self.is_simulation = is_simulation
+        self.dwa_config = dynamic_window_approach.Config(is_simulation=self.is_simulation)
         self.calibrate = calibrate # Real robot: only print poses, never drive
         self.raw_pose = None # Pose exactly as Optitrack reported it (real robot only)
         self.frame = self.course = None
@@ -364,13 +365,9 @@ class ObstacleCourseNode(Node):
             return # Calibration mode: look, don't drive
 
         ###### INSERT CODE HERE ######
-        self.get_logger().info(f"Pose: {self.pose}")
+        #self.get_logger().info(f"Pose: {self.pose}")
 
-        #try DWA integration
-
-        #TODO give sub goal
-
-        #TODO
+        #DWA integration
         if self.pose is None or self._ob.size == 0 or self.actual_velocity is None:
             return
         self._state = self.update_state()
