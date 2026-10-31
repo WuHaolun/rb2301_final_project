@@ -350,6 +350,10 @@ class ObstacleCourseNode(Node):
         self.last_pose = self.pose.copy()
         self.last_timestamp = timestamp
 
+    def set_dwa_param(self,to_goal, speed, ob):  #Update DWA param online
+        self.dwa_config.speed_cost_gain = speed
+        self.dwa_config.obstacle_cost_gain = ob
+        self.dwa_config.to_goal_heading_cost_gain = to_goal
 
     def timer_callback(self):
         """Controller loop. Insert path planning and PID control logic here"""
@@ -397,6 +401,9 @@ class ObstacleCourseNode(Node):
                     self.get_logger().info(
                         f'switch to the next _sub_goal!{self._sub_goal[-1]}'
                     )
+
+                    if (len(self._sub_goal) == 1):
+                        self.set_dwa_param(0.05,0.3,0.1)
         else:
             self.timer_callback_counter+=1
 
@@ -406,7 +413,8 @@ class ObstacleCourseNode(Node):
                                                                     x=self._state,
                                                                     #goal=self._goal,
                                                                     goal_heading= self._sub_goal[-1],
-                                                                    ob=self._ob
+                                                                    ob=self._ob,
+                                                                    config=self.dwa_config,
                                                                     )
         self._rviz_predicted_trajectory = predicted_trajectory
         self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
