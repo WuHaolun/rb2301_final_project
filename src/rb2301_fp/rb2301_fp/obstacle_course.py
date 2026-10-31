@@ -21,7 +21,6 @@ from visualization_msgs.msg import Marker, MarkerArray
 np.set_printoptions(2, suppress=True, threshold=np.inf) # Print numpy arrays to specified d.p., suppress scientific notation and do not truncate
 set_logger_level("obstaclecourse", level=LoggingSeverity.INFO) # Configure to either LoggingSeverity.INFO or LoggingSeverity.DEBUG
 
-
 _PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
 
 def wrap_deg(angle:float) -> float:
@@ -92,7 +91,10 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
 
-        self._sub_goal = ['+x','+y']# sub_goal_heading, in reverse order
+        if self.is_simulation == False:
+            self._sub_goal = ['+y','+x','+y']# sub_goal_heading, in reverse order
+        else:
+            self._sub_goal = ['+x','-y','+x']
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array

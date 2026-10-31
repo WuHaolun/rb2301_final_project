@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 show_animation = True
-is_simulation = False
+is_simulation = True
 
 
 class RobotType(Enum):
