@@ -66,12 +66,12 @@ class Config:
             self.v_resolution = 0.02  # [m/s]
             self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
             self.dt = 0.1  # [s] Time tick for motion prediction
-            self.predict_time = 2.5  # [s]
+            self.predict_time = 2.0  # [s]
 
             self.to_goal_cost_gain = 0.10
-            self.to_goal_heading_cost_gain = 0.2
+            self.to_goal_heading_cost_gain = 0.15
 
-            self.speed_cost_gain = 0.8
+            self.speed_cost_gain = 0.6
             self.obstacle_cost_gain = 0.02
             self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
