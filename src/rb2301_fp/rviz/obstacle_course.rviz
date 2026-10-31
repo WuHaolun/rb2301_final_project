@@ -1,0 +1,56 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.5
+      Plane Cell Count: 40
+      Color: 180; 180; 180
+      Alpha: 0.4
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacle Course
+      Enabled: true
+      Topic:
+        Value: /obstaclecourse/visualization
+        Depth: 1
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 245; 245; 245
+    Fixed Frame: fp_visualization
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Transformation:
+    Current:
+      Class: rviz_common/Identity
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: <Fixed Frame>
+      Scale: 80
+      Angle: 0
+      X: 2
+      Y: 0
+    Saved: ~
+Window Geometry:
+  Width: 1200
+  Height: 800

@@ -1,4 +1,5 @@
 from setuptools import find_packages, setup
+from glob import glob
 
 package_name = 'rb2301_fp'
 
@@ -11,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
     ],
     install_requires=['setuptools', 'numpy', 'matplotlib'],
     zip_safe=True,
