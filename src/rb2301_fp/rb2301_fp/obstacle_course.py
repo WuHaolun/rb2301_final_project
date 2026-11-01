@@ -10,15 +10,16 @@ from rb2301_fp import dynamic_window_approach
 
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
-from rclpy.qos import ReliabilityPolicy, QoSProfile
-from geometry_msgs.msg import PoseStamped
+from rclpy.qos import DurabilityPolicy, ReliabilityPolicy, QoSProfile
+from geometry_msgs.msg import Point, PoseStamped
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import ColorRGBA
+from visualization_msgs.msg import Marker, MarkerArray
 
 np.set_printoptions(2, suppress=True, threshold=np.inf) # Print numpy arrays to specified d.p., suppress scientific notation and do not truncate
 set_logger_level("obstaclecourse", level=LoggingSeverity.INFO) # Configure to either LoggingSeverity.INFO or LoggingSeverity.DEBUG
-
 
 _PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -77,6 +78,7 @@ class ObstacleCourseNode(Node):
         self.get_logger().info("Starting ObstacleCourseNode")
 
         self.is_simulation = is_simulation
+        self.dwa_config = dynamic_window_approach.Config(is_simulation=self.is_simulation)
         self.calibrate = calibrate # Real robot: only print poses, never drive
         self.raw_pose = None # Pose exactly as Optitrack reported it (real robot only)
         self.frame = self.course = None
@@ -90,7 +92,10 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = np.array([5.0, 0.0])
 
-        self._sub_goal = ['+x','-y','+x']# sub_goal_heading, in reverse order
+        if self.is_simulation == False:
+            self._sub_goal = ['+y','+x','+y']# sub_goal_heading, in reverse order
+        else:
+            self._sub_goal = ['+x','-y','+x']
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
@@ -137,6 +142,117 @@ class ObstacleCourseNode(Node):
         self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
 
         self.pose = None
+        self.init_rviz_visualization()
+
+    # RViz visualization
+    def init_rviz_visualization(self):
+        """Publish ROS messages only; safe to run over SSH without DISPLAY."""
+        self._rviz_predicted_trajectory = None
+        enabled = self.declare_parameter('visualization_enabled', True).value
+        self._rviz_frame = self.declare_parameter(
+            'visualization_frame', 'fp_visualization').value
+        if not enabled:
+            return
+        # Keep the latest complete scene for RViz instances that join later.
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._rviz_publisher = self.create_publisher(
+            MarkerArray, '~/visualization', qos)
+        self._rviz_timer = self.create_timer(0.1, self.publish_rviz_visualization)
+
+    def _rviz_marker(self, name, marker_type, points, color, size, stamp, z=0.03):
+        """Build one marker in controller coordinates; empty points delete it."""
+        marker = Marker()
+        marker.header.frame_id = self._rviz_frame
+        marker.header.stamp = stamp
+        marker.ns = name
+        marker.id = 0
+        marker.type = marker_type
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = marker.scale.y = marker.scale.z = float(size)
+        marker.color = ColorRGBA(r=color[0], g=color[1], b=color[2], a=1.0)
+        marker.lifetime.sec = 1
+        marker.points = [Point(x=float(p[0]), y=float(p[1]), z=z) for p in points]
+        marker.action = Marker.ADD if marker.points else Marker.DELETE
+        return marker
+
+    def publish_rviz_visualization(self):
+        """RViz equivalent of DWA animate(), plus the active sub-goal heading.
+
+        All data use self.pose's coordinates (Gazebo odom or Optitrack maze).
+        The standalone fp_visualization frame needs no TF when used as RViz's
+        Fixed Frame. This timer also runs while calibration/control is waiting.
+        """
+        if self.pose is None:
+            return
+        stamp = self.get_clock().now().to_msg()
+        position = np.asarray(self.pose[:2])
+        yaw = math.radians(self.pose[2])
+        scene = MarkerArray()
+
+        predicted = self._rviz_predicted_trajectory
+        if (self.calibrate or not self._sub_goal or self._ob.size == 0
+                or (predicted is not None and len(predicted) < 2)):
+            predicted = None
+        scene.markers.append(self._rviz_marker(
+            'predicted_trajectory', Marker.LINE_STRIP,
+            [] if predicted is None else predicted[:, :2],
+            (0.0, 0.7, 0.0), 0.025, stamp))
+        scene.markers.append(self._rviz_marker(
+            'robot_position', Marker.SPHERE_LIST, [position],
+            (1.0, 0.0, 0.0), 0.07, stamp, z=0.08))
+        scene.markers.append(self._rviz_marker(
+            'obstacles', Marker.POINTS, np.asarray(self._ob).reshape(-1, 2),
+            (0.1, 0.1, 0.1), 0.035, stamp))
+
+        # Blue cross, as in animate(); DWA currently follows _sub_goal instead.
+        goal = [] if self._goal is None else np.asarray(self._goal) + np.array(
+            [[-0.1, -0.1], [0.1, 0.1], [-0.1, 0.1], [0.1, -0.1]])
+        scene.markers.append(self._rviz_marker(
+            'reference_goal', Marker.LINE_LIST, goal,
+            (0.0, 0.2, 1.0), 0.035, stamp))
+
+        config = dynamic_window_approach.config
+        if config.robot_type == dynamic_window_approach.RobotType.rectangle:
+            outline = np.array([[-1, 1], [1, 1], [1, -1], [-1, -1], [-1, 1]])
+            outline = outline * [config.robot_length / 2, config.robot_width / 2]
+        else:
+            angles = np.linspace(0.0, 2 * math.pi, 49)
+            outline = config.robot_radius * np.column_stack(
+                (np.cos(angles), np.sin(angles)))
+        rotation = np.array([[math.cos(yaw), -math.sin(yaw)],
+                             [math.sin(yaw), math.cos(yaw)]])
+        scene.markers.append(self._rviz_marker(
+            'robot_footprint', Marker.LINE_STRIP, outline @ rotation.T + position,
+            (0.1, 0.1, 0.1), 0.02, stamp, z=0.06))
+        heading = [position, position + 0.5 * np.array([math.cos(yaw), math.sin(yaw)])]
+        arrow = self._rviz_marker('robot_heading', Marker.ARROW, heading,
+                                  (1.0, 0.0, 0.0), 0.04, stamp, z=0.1)
+        arrow.scale.y, arrow.scale.z = 0.08, 0.12
+        scene.markers.append(arrow)
+
+        direction = {'+x': (1, 0), '-x': (-1, 0), '+y': (0, 1), '-y': (0, -1)}
+        sub_goal = []
+        if self._sub_goal:
+            sub_goal = [position, position + 0.8 * np.array(direction[self._sub_goal[-1]])]
+        arrow = self._rviz_marker('sub_goal_heading', Marker.ARROW, sub_goal,
+                                  (0.0, 0.65, 0.9), 0.035, stamp, z=0.12)
+        arrow.scale.y, arrow.scale.z = 0.09, 0.12
+        scene.markers.append(arrow)
+
+        # One POINTS marker with per-point colors avoids stale segment IDs.
+        palette = [(1.0, 0.4, 0.0), (0.6, 0.0, 0.8), (0.0, 0.65, 0.65),
+                   (0.8, 0.55, 0.0), (0.9, 0.0, 0.5), (0.3, 0.4, 1.0)]
+        points, colors = [], []
+        for i, segment in enumerate(self._segmentation):
+            points.extend(segment)
+            r, g, b = palette[i % len(palette)]
+            colors.extend([ColorRGBA(r=r, g=g, b=b, a=1.0) for _ in segment])
+        segments = self._rviz_marker('segmentation', Marker.POINTS, points,
+                                     (1.0, 1.0, 1.0), 0.065, stamp, z=0.05)
+        segments.colors = colors
+        scene.markers.append(segments)
+        self._rviz_publisher.publish(scene)
 
     def sub_scan_callback(self, msg):
         """Scan subscriber"""
@@ -234,6 +350,10 @@ class ObstacleCourseNode(Node):
         self.last_pose = self.pose.copy()
         self.last_timestamp = timestamp
 
+    def set_dwa_param(self,to_goal, speed, ob):  #Update DWA param online
+        self.dwa_config.speed_cost_gain = speed
+        self.dwa_config.obstacle_cost_gain = ob
+        self.dwa_config.to_goal_heading_cost_gain = to_goal
 
     def timer_callback(self):
         """Controller loop. Insert path planning and PID control logic here"""
@@ -249,13 +369,9 @@ class ObstacleCourseNode(Node):
             return # Calibration mode: look, don't drive
 
         ###### INSERT CODE HERE ######
-        self.get_logger().info(f"Pose: {self.pose}")
+        #self.get_logger().info(f"Pose: {self.pose}")
 
-        #try DWA integration
-
-        #TODO give sub goal
-
-        #TODO
+        #DWA integration
         if self.pose is None or self._ob.size == 0 or self.actual_velocity is None:
             return
         self._state = self.update_state()
@@ -285,6 +401,9 @@ class ObstacleCourseNode(Node):
                     self.get_logger().info(
                         f'switch to the next _sub_goal!{self._sub_goal[-1]}'
                     )
+
+                    if (len(self._sub_goal) == 1):
+                        self.set_dwa_param(0.05,0.3,0.1)
         else:
             self.timer_callback_counter+=1
 
@@ -294,10 +413,12 @@ class ObstacleCourseNode(Node):
                                                                     x=self._state,
                                                                     #goal=self._goal,
                                                                     goal_heading= self._sub_goal[-1],
-                                                                    ob=self._ob
+                                                                    ob=self._ob,
+                                                                    config=self.dwa_config,
                                                                     )
+        self._rviz_predicted_trajectory = predicted_trajectory
         self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
-        self._state[3] , self._state[4] = self.actual_velocity[0], self.actual_velocity[1]    #TODO change this to real speed
+        self._state[3] , self._state[4] = u[0], self.actual_velocity[1]    #TODO change this to real speed
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
         ###### INSERT CODE HERE ######

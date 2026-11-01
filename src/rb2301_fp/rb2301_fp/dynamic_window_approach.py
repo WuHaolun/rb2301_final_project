@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 show_animation = True
-is_simulation = False
+is_simulation = True
 
 
 class RobotType(Enum):
@@ -26,7 +26,7 @@ class Config:
     simulation parameter class
     """
 
-    def __init__(self):
+    def __init__(self, is_simulation=True):
         if is_simulation:
             # robot parameter
             self.max_speed = 0.4  # [m/s]
@@ -66,13 +66,13 @@ class Config:
             self.v_resolution = 0.02  # [m/s]
             self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
             self.dt = 0.1  # [s] Time tick for motion prediction
-            self.predict_time = 2.5  # [s]
+            self.predict_time = 2.0  # [s]
 
             self.to_goal_cost_gain = 0.10
-            self.to_goal_heading_cost_gain = 0.2
+            self.to_goal_heading_cost_gain = 0.15
 
-            self.speed_cost_gain = 0.9
-            self.obstacle_cost_gain = 0.005
+            self.speed_cost_gain = 0.6
+            self.obstacle_cost_gain = 0.02
             self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
 
@@ -206,38 +206,39 @@ def calc_control_and_trajectory(x, dw, config, goal, ob,goal_heading):
 
 
 def calc_obstacle_cost(trajectory, ob, config):
-    """
-    calc obstacle cost inf: collision
-    """
+    """Return inverse minimum clearance, or inf for a footprint collision."""
     if np.size(ob) == 0:
         return 0.0
-    ox = ob[:, 0]
-    oy = ob[:, 1]
-    dx = trajectory[:, 0] - ox[:, None]
-    dy = trajectory[:, 1] - oy[:, None]
+    dx = ob[:, 0, None] - trajectory[:, 0]
+    dy = ob[:, 1, None] - trajectory[:, 1]
     r = np.hypot(dx, dy)
 
     if config.robot_type == RobotType.rectangle:
-        yaw = trajectory[:, 2]
-        rot = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
-        rot = np.transpose(rot, [2, 0, 1])
-        local_ob = ob[:, None] - trajectory[:, 0:2]
-        # Rotate each relative point using the heading at the same time step.
-        local_ob = np.einsum('oti,tij->otj', local_ob, rot)
-        local_ob = local_ob.reshape(-1, local_ob.shape[-1])
-        upper_check = local_ob[:, 0] <= config.robot_length / 2
-        right_check = local_ob[:, 1] <= config.robot_width / 2
-        bottom_check = local_ob[:, 0] >= -config.robot_length / 2
-        left_check = local_ob[:, 1] >= -config.robot_width / 2
-        if (np.logical_and(np.logical_and(upper_check, right_check),
-                           np.logical_and(bottom_check, left_check))).any():
-            return float("Inf")
+        half_length = config.robot_length / 2
+        half_width = config.robot_width / 2
+        collision_radius = np.hypot(half_length, half_width)
+        # Keep rotated corners in the broad phase despite floating-point rounding.
+        collision_radius += 8 * np.finfo(r.dtype).eps * max(1.0, collision_radius)
+        obstacle_indices, step_indices = np.nonzero(r <= collision_radius)
+
+        if obstacle_indices.size:
+            # Only nearby point/pose pairs need an exact rectangle check.
+            yaw = trajectory[:, 2]
+            cosine = np.cos(yaw)[step_indices]
+            sine = np.sin(yaw)[step_indices]
+            nearby_dx = dx[obstacle_indices, step_indices]
+            nearby_dy = dy[obstacle_indices, step_indices]
+            local_x = nearby_dx * cosine + nearby_dy * sine
+            local_y = -nearby_dx * sine + nearby_dy * cosine
+            if ((np.abs(local_x) <= half_length)
+                    & (np.abs(local_y) <= half_width)).any():
+                return float("Inf")
     elif config.robot_type == RobotType.circle:
-        if np.array(r <= config.robot_radius).any():
+        if (r <= config.robot_radius).any():
             return float("Inf")
 
-    min_r = np.min(r)
-    return 1.0 / min_r  # OK
+    # All points still contribute to clearance, including broad-phase rejects.
+    return 1.0 / np.min(r)
 
 
 def calc_to_goal_cost(trajectory, goal):
