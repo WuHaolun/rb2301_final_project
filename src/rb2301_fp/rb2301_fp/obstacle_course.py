@@ -403,7 +403,7 @@ class ObstacleCourseNode(Node):
                     )
 
                     if (len(self._sub_goal) == 1):
-                        self.set_dwa_param(0.05,0.3,0.1)
+                        self.set_dwa_param(0.1,0.3,0.1)
         else:
             self.timer_callback_counter+=1
 

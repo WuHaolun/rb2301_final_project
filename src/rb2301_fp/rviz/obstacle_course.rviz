@@ -1,29 +1,54 @@
 Panels:
   - Class: rviz_common/Displays
+    Help Height: 138
     Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+      Splitter Ratio: 0.5
+    Tree Height: 319
   - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
     Name: Views
+    Splitter Ratio: 0.5
 Visualization Manager:
   Class: ""
   Displays:
-    - Class: rviz_default_plugins/Grid
-      Name: Grid
-      Enabled: true
+    - Alpha: 0.4000000059604645
       Cell Size: 0.5
-      Plane Cell Count: 40
+      Class: rviz_default_plugins/Grid
       Color: 180; 180; 180
-      Alpha: 0.4
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Name: Obstacle Course
       Enabled: true
+      Name: Obstacle Course
+      Namespaces:
+        obstacles: true
+        predicted_trajectory: true
+        reference_goal: true
+        robot_footprint: true
+        robot_heading: true
+        robot_position: true
+        sub_goal_heading: true
       Topic:
-        Value: /obstaclecourse/visualization
         Depth: 1
+        Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Durability Policy: Transient Local
+        Value: /obstaclecourse/visualization
       Value: true
   Enabled: true
   Global Options:
@@ -33,24 +58,43 @@ Visualization Manager:
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
   Transformation:
     Current:
       Class: rviz_common/Identity
   Value: true
   Views:
     Current:
-      Class: rviz_default_plugins/TopDownOrtho
-      Name: Current View
-      Target Frame: <Fixed Frame>
-      Scale: 80
       Angle: 0
-      X: 2
-      Y: 0
+      Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Scale: 142.6112823486328
+      Target Frame: <Fixed Frame>
+      Value: TopDownOrtho (rviz_default_plugins)
+      X: 3.199061393737793
+      Y: -1.7530165910720825
     Saved: ~
 Window Geometry:
-  Width: 1200
-  Height: 800
+  Displays:
+    collapsed: false
+  Height: 1199
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd00000001000000000000030f0000040ffc0200000002fb000000100044006900730070006c00610079007300000000700000023b0000018600fffffffb0000000a0056006900650077007300000000700000040f0000013800ffffff000006a90000040f00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Views:
+    collapsed: false
+  Width: 1705
+  X: 76
+  Y: 108

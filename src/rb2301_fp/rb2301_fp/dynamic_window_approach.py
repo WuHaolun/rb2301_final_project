@@ -40,7 +40,7 @@ class Config:
             self.predict_time = 2.5  # [s]
 
             self.to_goal_cost_gain = 0.10
-            self.to_goal_heading_cost_gain = 0.02
+            self.to_goal_heading_cost_gain = 0.04
 
             self.speed_cost_gain = 0.9
             self.obstacle_cost_gain = 0.05
