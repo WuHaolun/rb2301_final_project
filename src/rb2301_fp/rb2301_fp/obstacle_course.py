@@ -104,7 +104,7 @@ class ObstacleCourseNode(Node):
         self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
         self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
         self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
-        self.self.outlier_offset_threshold = 1
+        self.outlier_offset_threshold = 1
         self.tilt_threshold = 5 # in angular
         self.close_threshold = 0.7# how close to a deadend triggers transformation to the next _sub_goal
         self.curve_threshold = 20# beyond the angle will not be seen as a single wall
