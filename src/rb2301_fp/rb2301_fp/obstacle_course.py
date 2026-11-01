@@ -380,12 +380,13 @@ class ObstacleCourseNode(Node):
             self.move_2D()
             return
 
-        self._segmentation = []
+        
 
         if self.timer_callback_counter % self.deadend_check_gap == 0:
             self.timer_callback_counter = 1
             self.get_logger().info('deadend check!')
             #Detect deadend_wall and change subgoal
+            self._segmentation = []
             deadend_wall = self.deadend_detector()
             if deadend_wall is not None:
                 distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
