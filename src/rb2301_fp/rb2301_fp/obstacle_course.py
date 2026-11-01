@@ -103,15 +103,15 @@ class ObstacleCourseNode(Node):
 
         self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
         self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
-        self.outlier_dot_threshold = 0.05 # The distance from the point with the outlier dot to the fitted line
+        self.outlier_dot_threshold = 0.7 # The distance from the point with the outlier dot to the fitted line
         self.tilt_threshold = 5 # in angular
         self.close_threshold = 0.7# how close to a deadend triggers transformation to the next _sub_goal
-        self.curve_threshold = 20# 
+        self.curve_threshold = 20# beyond the angle will not be seen as a single wall
         self.sub_goal_cd =1.0# sub_goal switch cooldown,in seconds
-        self.timestamp = 0.0
+        self.timestamp = 0.0#
         self._segmentation = []
         self.deadend_check_gap = 20# how many times the timercallback run required for deadend check once
-        self.timer_callback_counter = 0
+        self.timer_callback_counter = 1
 
         if is_simulation:
             self.max_translate_velocity = 0.5
@@ -383,7 +383,7 @@ class ObstacleCourseNode(Node):
         self._segmentation = []
 
         if self.timer_callback_counter % self.deadend_check_gap == 0:
-            self.timer_callback_counter = 0
+            self.timer_callback_counter = 1
 
             #Detect deadend_wall and change subgoal
             deadend_wall = self.deadend_detector()
@@ -470,7 +470,7 @@ class ObstacleCourseNode(Node):
             self._segmentation.append(segment)  #add valid segment for animation  
 
             if distance > self.outlier_dot_threshold:
-                #self.get_logger().warn(f'infeasible wall!too short:distance:{distance}')
+                self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{distance}')
                 return None
 
             goal_direction = {
@@ -481,7 +481,7 @@ class ObstacleCourseNode(Node):
             # Reject a wall behind the robot along the current goal direction.
             robot_side = normal @ self.pose[:2] + C
             if robot_side * np.dot(normal, goal_direction) > 0:
-                #self.get_logger().warn(f'infeasible wall!it is behind the robot')
+                self.get_logger().warn(f'infeasible wall!it is behind the robot')
                 return None
 
             vector_1 = vh[0]
@@ -493,7 +493,7 @@ class ObstacleCourseNode(Node):
             angle_deg = self.measure_angle(vector_1,vector_2)
             # A blocking wall is perpendicular to travel; SVD signs are arbitrary.
             if abs(angle_deg - 90.0) > self.tilt_threshold:
-                #self.get_logger().warn(f'infeasible wall!it is not in good angle')
+                self.get_logger().warn(f'infeasible wall!it is not in good angle')
                 return None
             
             return (A,B,C)
@@ -501,8 +501,8 @@ class ObstacleCourseNode(Node):
         # Find the global extreme before accepting any candidate segment.
         farthest_dot=self.pose[:2]
         last_dot = None
-        double_ob = np.concatenate((self._ob, self._ob), axis=0)
-        for dot in double_ob:
+        
+        for dot in self._ob:
             if self._sub_goal[-1] == '+x':# update the farthest dot
                 if dot[0]>farthest_dot[0]:
                     farthest_dot = dot
@@ -521,7 +521,10 @@ class ObstacleCourseNode(Node):
         continuous_list=[]
         aver_hist_vector = None
         fracture = False
-        for dot in double_ob:
+
+        cache_segment=[]
+        fractured_flag = False
+        for dot in self._ob:
             if last_dot is not None:
                 distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
 
@@ -541,9 +544,14 @@ class ObstacleCourseNode(Node):
                 if result is not None:
                     return result
                 continuous_list=[dot]
+                fractured_flag = True
             else:
-                continuous_list.append(dot)
+                if fractured_flag == False:
+                    cache_segment.append(dot)
+                else:
+                    continuous_list.append(dot)
             last_dot = dot
+        continuous_list =continuous_list + cache_segment
         return check_segment(continuous_list,farthest_dot)
 
 def main(args=None):
