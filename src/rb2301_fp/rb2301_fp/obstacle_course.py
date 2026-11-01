@@ -3,12 +3,15 @@ import configparser
 import math
 import os
 import time
+from threading import Lock
 import numpy as np
 import rclpy
 from typing import List, Tuple
 from rb2301_fp import dynamic_window_approach
 
 from rclpy.node import Node
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.logging import set_logger_level, LoggingSeverity
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy, QoSProfile
 from geometry_msgs.msg import Point, PoseStamped
@@ -76,6 +79,7 @@ class ObstacleCourseNode(Node):
     def __init__(self, is_simulation:bool=True, calibrate:bool=False):
         super().__init__('obstaclecourse')
         self.get_logger().info("Starting ObstacleCourseNode")
+        self.init_callback_execution()
 
         self.is_simulation = is_simulation
         self.dwa_config = dynamic_window_approach.Config(is_simulation=self.is_simulation)
@@ -119,11 +123,15 @@ class ObstacleCourseNode(Node):
         else:
             self.max_translate_velocity = 0.3 # Please keep this in place; 0.3m/s is more than fast enough
 
-        self.sub_scan = self.create_subscription(LaserScan, "scan", self.sub_scan_callback, 2) # Subscribe to LiDAR scan data
+        self.sub_scan = self.create_subscription(
+            LaserScan, "scan", self.sub_scan_callback, 2,
+            callback_group=self._sensor_group)
 
         # Subscribe to the dynamic_pose topic from Gazebo that publishes ground-truth pose data
         if self.is_simulation:
-            self.subscription = self.create_subscription(Odometry, 'odom', self.odometer_callback, 2)
+            self.subscription = self.create_subscription(
+                Odometry, 'odom', self.odometer_callback, 2,
+                callback_group=self._sensor_group)
         else:
             qos_profile = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
             # On the Bingda robots ROS_DOMAIN_ID is the robot's number, so the Optitrack topic is picked automatically
@@ -136,14 +144,38 @@ class ObstacleCourseNode(Node):
                 PoseStamped,
                 f'/vrpn_mocap/bingda_{self.robot_number:03d}/pose',
                 self.optitrack_callback,
-                qos_profile
+                qos_profile,
+                callback_group=self._sensor_group
                 )
 
         self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10) # Publish to cmd_vel node
-        self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
+        self.timer = self.create_timer(
+            0.05, self.timer_callback, callback_group=self._control_group)
 
         self.pose = None
         self.init_rviz_visualization()
+
+    def init_callback_execution(self):
+        """Serialize sensors and control separately; allow the two groups to overlap."""
+        self._sensor_group = MutuallyExclusiveCallbackGroup()
+        self._control_group = MutuallyExclusiveCallbackGroup()
+        self._sensor_lock = Lock()
+
+    def _store_pose(self, pose, stamp, raw_pose=None):
+        """Publish pose, derived velocity and timestamp as one protected update."""
+        with self._sensor_lock:
+            self.pose = pose
+            if raw_pose is not None:
+                self.raw_pose = raw_pose
+            self.update_actual_velocity(stamp)
+        return pose
+
+    def _read_sensor_data(self, *names):
+        """Copy selected sensor values; never hold the lock during planning or drawing."""
+        with self._sensor_lock:
+            values = (getattr(self, name) for name in names)
+            return tuple(value.copy() if isinstance(value, np.ndarray) else value
+                         for value in values)
 
     # RViz visualization
     def init_rviz_visualization(self):
@@ -159,7 +191,8 @@ class ObstacleCourseNode(Node):
                          durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._rviz_publisher = self.create_publisher(
             MarkerArray, '~/visualization', qos)
-        self._rviz_timer = self.create_timer(0.1, self.publish_rviz_visualization)
+        self._rviz_timer = self.create_timer(
+            0.1, self.publish_rviz_visualization, callback_group=self._control_group)
 
     def _rviz_marker(self, name, marker_type, points, color, size, stamp, z=0.03):
         """Build one marker in controller coordinates; empty points delete it."""
@@ -184,15 +217,16 @@ class ObstacleCourseNode(Node):
         The standalone fp_visualization frame needs no TF when used as RViz's
         Fixed Frame. This timer also runs while calibration/control is waiting.
         """
-        if self.pose is None:
+        pose, obstacles = self._read_sensor_data('pose', '_ob')
+        if pose is None:
             return
         stamp = self.get_clock().now().to_msg()
-        position = np.asarray(self.pose[:2])
-        yaw = math.radians(self.pose[2])
+        position = pose[:2]
+        yaw = math.radians(pose[2])
         scene = MarkerArray()
 
         predicted = self._rviz_predicted_trajectory
-        if (self.calibrate or not self._sub_goal or self._ob.size == 0
+        if (self.calibrate or not self._sub_goal or obstacles.size == 0
                 or (predicted is not None and len(predicted) < 2)):
             predicted = None
         scene.markers.append(self._rviz_marker(
@@ -203,7 +237,7 @@ class ObstacleCourseNode(Node):
             'robot_position', Marker.SPHERE_LIST, [position],
             (1.0, 0.0, 0.0), 0.07, stamp, z=0.08))
         scene.markers.append(self._rviz_marker(
-            'obstacles', Marker.POINTS, np.asarray(self._ob).reshape(-1, 2),
+            'obstacles', Marker.POINTS, obstacles.reshape(-1, 2),
             (0.1, 0.1, 0.1), 0.035, stamp))
 
         # Blue cross, as in animate(); DWA currently follows _sub_goal instead.
@@ -265,17 +299,20 @@ class ObstacleCourseNode(Node):
         self.update_ob(msg)
 
     def update_ob(self,msg):
-        if self.pose is None:
+        pose, = self._read_sensor_data('pose')
+        if pose is None:
             return
         r = self.last_scan
         step = 2 if len(msg.ranges) > 720 else 1
-        yaw = np.deg2rad(self.pose[2])
+        yaw = np.deg2rad(pose[2])
         # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
         a = msg.angle_min + np.arange(r.size) * msg.angle_increment * step + 3.1416 + yaw
         valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
-        x = self.pose[0] + 0.11423 * np.cos(yaw)
-        y = self.pose[1] + 0.11423 * np.sin(yaw)
-        self._ob = np.column_stack((x + r[valid] * np.cos(a[valid]), y + r[valid] * np.sin(a[valid])))
+        x = pose[0] + 0.11423 * np.cos(yaw)
+        y = pose[1] + 0.11423 * np.sin(yaw)
+        obstacles = np.column_stack((x + r[valid] * np.cos(a[valid]), y + r[valid] * np.sin(a[valid])))
+        with self._sensor_lock:
+            self._ob = obstacles
 
     def yaw_from_quaternion(self, q):
         '''Returns yaw angle (in rad) for orientation based on given quaternion input q'''
@@ -288,15 +325,14 @@ class ObstacleCourseNode(Node):
         This callback will run everytime the rclpy executor spins'''
         x, y = msg.pose.position.x, msg.pose.position.y
         heading = np.rad2deg(self.yaw_from_quaternion(msg.pose.orientation))
-        self.raw_pose = np.array((x,y,heading))
+        raw_pose = np.array((x,y,heading))
         x, y, heading = optitrack_to_maze(x, y, heading, self.frame) # CA2 maze frame, see optitrack_variables.config
-        self.pose = np.array((x,y,heading))
-        self.update_actual_velocity(msg.header.stamp)
-        return self.pose
+        return self._store_pose(np.array((x,y,heading)), msg.header.stamp, raw_pose)
 
     def to_course(self, pose=None):
         '''Convert a pose [x, y, heading] (default: self.pose) from the CA2 maze frame to the final-project course frame. Optional; see [course] in optitrack_variables.config'''
-        pose = self.pose if pose is None else pose
+        if pose is None:
+            pose, = self._read_sensor_data('pose')
         return np.array(maze_to_course(pose[0], pose[1], pose[2], self.course)) if self.course else np.array(pose)
 
     def odometer_callback(self, msg):
@@ -304,9 +340,8 @@ class ObstacleCourseNode(Node):
         This callback will run everytime the rclpy executor spins'''
         latest_pose_msg = msg.pose.pose
         heading = np.rad2deg(self.yaw_from_quaternion(latest_pose_msg.orientation))
-        self.pose = np.array((latest_pose_msg.position.x, latest_pose_msg.position.y, heading))
-        self.update_actual_velocity(msg.header.stamp)
-        return self.pose
+        pose = np.array((latest_pose_msg.position.x, latest_pose_msg.position.y, heading))
+        return self._store_pose(pose, msg.header.stamp)
 
     def move_2D(self, x:float=0.0, y:float=0.0, turn:float=0.0):
         '''Publishes a Twist message to ROS to move a robot. Inputs are x and y linear velocities, as well as turn (z-axis yaw) angular velocity.'''
@@ -327,10 +362,11 @@ class ObstacleCourseNode(Node):
 
     def update_state(self)->np.ndarray:
         """update speed and orientation using pose[], keep vel and omega"""
-        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self._state[3], self._state[4]])
+        pose, = self._read_sensor_data('pose')
+        return np.array([pose[0], pose[1], np.deg2rad(pose[2]), self._state[3], self._state[4]])
 
     def update_actual_velocity(self, stamp):
-        """use differentiation of position to estimate the forward speed(m/s) and angular speed(rad/s)"""
+        """Estimate forward/angular velocity; called by _store_pose with _sensor_lock held."""
         timestamp = stamp.sec + stamp.nanosec * 1e-9
         if self.last_timestamp is not None:
             dt = timestamp - self.last_timestamp
@@ -361,14 +397,15 @@ class ObstacleCourseNode(Node):
 
     def timer_callback(self):
         """Controller loop. Insert path planning and PID control logic here"""
-        if self.pose is None:
+        pose, raw_pose = self._read_sensor_data('pose', 'raw_pose')
+        if pose is None:
             print("No pose detected")
             return # Does not run if no pose received from Odom or Optitrack
 
-        if self.calibrate and self.raw_pose is not None:
+        if self.calibrate and raw_pose is not None:
             self._ticks += 1
             if self._ticks % 10 == 0: # twice a second
-                ox, oy, oh = self.raw_pose
+                ox, oy, oh = raw_pose
                 #self.get_logger().info(f"optitrack ({ox:+.3f}, {oy:+.3f}, {oh:+7.1f} deg)  ->  maze ({self.pose[0]:+.3f}, {self.pose[1]:+.3f}, {self.pose[2]:+7.1f} deg)")
             return # Calibration mode: look, don't drive
 
@@ -376,7 +413,8 @@ class ObstacleCourseNode(Node):
         #self.get_logger().info(f"Pose: {self.pose}")
 
         #DWA integration
-        if self.pose is None or self._ob.size == 0 or self.actual_velocity is None:
+        obstacles, actual_velocity = self._read_sensor_data('_ob', 'actual_velocity')
+        if obstacles.size == 0 or actual_velocity is None:
             return
         self._state = self.update_state()
 
@@ -393,7 +431,7 @@ class ObstacleCourseNode(Node):
             self._segmentation = []
             deadend_wall = self.deadend_detector()
             if deadend_wall is not None:
-                distance_to_deadend_wall = self.measure_distance_dot_and_line(self.pose,deadend_wall)
+                distance_to_deadend_wall = self.measure_distance_dot_and_line(pose,deadend_wall)
                 self.get_logger().info(f'wall detected!distance={distance_to_deadend_wall}')
                 if distance_to_deadend_wall <= self.close_threshold and time.monotonic()>=self.timestamp+self.sub_goal_cd:
                     self._sub_goal.pop()
@@ -420,12 +458,12 @@ class ObstacleCourseNode(Node):
                                                                     x=self._state,
                                                                     #goal=self._goal,
                                                                     goal_heading= self._sub_goal[-1],
-                                                                    ob=self._ob,
+                                                                    ob=obstacles,
                                                                     config=self.dwa_config,
                                                                     )
         self._rviz_predicted_trajectory = predicted_trajectory
         self.move_2D(u[0],0.0,u[1])
-        self._state[3] , self._state[4] = u[0], self.actual_velocity[1]    #TODO change this to real speed
+        self._state[3] , self._state[4] = u[0], actual_velocity[1]    #TODO change this to real speed
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
         ###### INSERT CODE HERE ######
@@ -452,7 +490,8 @@ class ObstacleCourseNode(Node):
         利用ob数组有序的性质,检测阻挡子目标的那堵墙
         """
         
-        if self.pose is None or self._ob.size == 0 or not self._sub_goal:
+        pose, obstacles = self._read_sensor_data('pose', '_ob')
+        if pose is None or obstacles.size == 0 or not self._sub_goal:
             return None
 
         def check_segment(segment,farthest_dot):
@@ -487,7 +526,7 @@ class ObstacleCourseNode(Node):
             }[self._sub_goal[-1]]
             normal = np.array([A, B])
             # Reject a wall behind the robot along the current goal direction.
-            robot_side = normal @ self.pose[:2] + C
+            robot_side = normal @ pose[:2] + C
             if robot_side * np.dot(normal, goal_direction) > 0:
                 self.get_logger().warn(f'infeasible wall!it is behind the robot')
                 return None
@@ -507,10 +546,10 @@ class ObstacleCourseNode(Node):
             return (A,B,C)
 
         # Find the global extreme before accepting any candidate segment.
-        farthest_dot=self.pose[:2]
+        farthest_dot=pose[:2]
         last_dot = None
         
-        for dot in self._ob:
+        for dot in obstacles:
             if self._sub_goal[-1] == '+x':# update the farthest dot
                 if dot[0]>farthest_dot[0]:
                     farthest_dot = dot
@@ -532,7 +571,7 @@ class ObstacleCourseNode(Node):
 
         cache_segment=[]
         fractured_flag = False
-        for dot in self._ob:
+        for dot in obstacles:
             if last_dot is not None:
                 distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
 
@@ -562,6 +601,17 @@ class ObstacleCourseNode(Node):
         continuous_list =continuous_list + cache_segment
         return check_segment(continuous_list,farthest_dot)
 
+def _spin_obstacle_node(node):
+    """Allow one sensor callback alongside one control/visualization callback."""
+    executor = MultiThreadedExecutor(num_threads=2)
+    try:
+        executor.add_node(node)
+        executor.spin()
+    finally:
+        # Wait for callbacks to finish before main destroys the node.
+        executor.shutdown()
+
+
 def main(args=None):
     arg_parser = argparse.ArgumentParser(description="RB2301 final project")
     arg_parser.add_argument('--calibrate', action='store_true', help="Real robot: only print the Optitrack pose and the maze-frame pose twice a second, never drive")
@@ -579,11 +629,13 @@ def main(args=None):
     # Start spinning the obstacle node and only stop once SystemExit error is raised within the node callback
     obstacle = ObstacleCourseNode(is_simulation, cli_args.calibrate)
     try:
-        rclpy.spin(obstacle)
-    except SystemExit:
+        _spin_obstacle_node(obstacle)
+    except (SystemExit, KeyboardInterrupt, ExternalShutdownException):
         print("Shutting down")
-    obstacle.destroy_node()
-    rclpy.shutdown()
+    finally:
+        obstacle.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
