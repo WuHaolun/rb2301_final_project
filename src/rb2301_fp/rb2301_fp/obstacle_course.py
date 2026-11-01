@@ -95,7 +95,7 @@ class ObstacleCourseNode(Node):
         if self.is_simulation == False:
             self._sub_goal = ['+y','+x','+y']# sub_goal_heading, in reverse order
         else:
-            self._sub_goal = ['+x','-y','+x']
+            self._sub_goal = ['+x','+x','-y','+x']
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
@@ -409,7 +409,7 @@ class ObstacleCourseNode(Node):
 
                     if (len(self._sub_goal) == 1):
                         self.close_threshold /= 2
-                        self.set_dwa_param(0.01,0.5,0.05,2.0,0.01)
+                        self.set_dwa_param(to_goal=0.3,speed=0.2,ob=0.01,pre_time=1.5,v_res=0.01)
                         self.get_logger().info('dwa param changed')
         else:
             self.timer_callback_counter+=1
@@ -417,6 +417,7 @@ class ObstacleCourseNode(Node):
 
         self._trajectory = np.vstack((self._trajectory, self._state))
         u, predicted_trajectory = dynamic_window_approach.dwa_control(
+                                                                    self,
                                                                     x=self._state,
                                                                     #goal=self._goal,
                                                                     goal_heading= self._sub_goal[-1],
@@ -478,7 +479,7 @@ class ObstacleCourseNode(Node):
             self._segmentation.append(segment)  #add valid segment for animation  
 
             if x_distance > self.outlier_dot_threshold and y_distance < self.outlier_offset_threshold:
-                self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{x_distance}')
+                #self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{x_distance}')
                 return None
 
             goal_direction = {
@@ -489,7 +490,7 @@ class ObstacleCourseNode(Node):
             # Reject a wall behind the robot along the current goal direction.
             robot_side = normal @ self.pose[:2] + C
             if robot_side * np.dot(normal, goal_direction) > 0:
-                self.get_logger().warn(f'infeasible wall!it is behind the robot')
+                #self.get_logger().warn(f'infeasible wall!it is behind the robot')
                 return None
 
             vector_1 = vh[0]
@@ -501,7 +502,7 @@ class ObstacleCourseNode(Node):
             angle_deg = self.measure_angle(vector_1,vector_2)
             # A blocking wall is perpendicular to travel; SVD signs are arbitrary.
             if abs(angle_deg - 90.0) > self.tilt_threshold:
-                self.get_logger().warn(f'infeasible wall!it is not in good angle')
+                #self.get_logger().warn(f'infeasible wall!it is not in good angle')
                 return None
             
             return (A,B,C)
