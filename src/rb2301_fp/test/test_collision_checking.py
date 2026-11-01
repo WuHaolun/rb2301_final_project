@@ -21,7 +21,7 @@ SPEC.loader.exec_module(dwa)
 RobotType = dwa.RobotType
 
 
-# Independent collision implementation without the broad phase.
+# Frozen pre-optimization implementation; independent of the new broad phase.
 def reference_obstacle_cost(trajectory, ob, config):
     """
     calc obstacle cost inf: collision
@@ -53,27 +53,8 @@ def reference_obstacle_cost(trajectory, ob, config):
         if np.array(r <= config.robot_radius).any():
             return float("Inf")
 
-    return reference_heading_cost(trajectory, ob, config)
-
-
-def reference_heading_cost(trajectory, obstacles, config):
-    trajectory = np.asarray(trajectory, dtype=float)
-    obstacles = np.asarray(obstacles, dtype=float)
-    candidates = []
-    for obstacle in obstacles:
-        distances = [np.linalg.norm(obstacle - pose[:2]) for pose in trajectory]
-        step = int(np.argmin(distances))
-        candidates.append((distances[step], step, obstacle))
-    # Stable ordering also matches argsort for the distinct distances in these checks.
-    candidates.sort(key=lambda item: item[0])
-    cost = 0.0
-    for distance, step, obstacle in candidates[:config.closest_dot_quality]:
-        pose = trajectory[step]
-        offset = obstacle - pose[:2]
-        cosine = (offset[0] * np.cos(pose[2]) + offset[1] * np.sin(pose[2])) / distance
-        angle = np.arccos(np.clip(cosine, -1.0, 1.0))
-        cost += (2.0 - angle / np.pi) / distance
-    return cost
+    min_r = np.min(r)
+    return 1.0 / min_r  # OK
 
 
 
@@ -95,7 +76,7 @@ class CollisionCheckingTests(unittest.TestCase):
     def assert_reference_cost(self, trajectory, obstacles):
         expected = reference_obstacle_cost(trajectory, obstacles, self.config)
         actual = dwa.calc_obstacle_cost(trajectory, obstacles, self.config)
-        np.testing.assert_allclose(actual, expected, rtol=1e-7, atol=1e-8)
+        np.testing.assert_equal(actual, expected)
 
     def test_empty_obstacles(self):
         trajectory = np.zeros((1, 5))
@@ -119,36 +100,14 @@ class CollisionCheckingTests(unittest.TestCase):
     def test_circle_broad_phase_does_not_enlarge_rectangle(self):
         trajectory = np.zeros((1, 5))
         obstacles = np.array([[0.12, 0.0]])
-        self.assertAlmostEqual(dwa.calc_obstacle_cost(trajectory, obstacles, self.config), 2 / 0.12)
+        self.assertAlmostEqual(dwa.calc_obstacle_cost(trajectory, obstacles, self.config), 1 / 0.12)
 
     def test_clearance_still_uses_distant_points(self):
         trajectory = np.zeros((2, 5))
         trajectory[1, 0] = 0.2
         obstacles = np.array([[4.0, 0.0], [0.0, 3.0]])
+        self.assertEqual(dwa.calc_obstacle_cost(trajectory, obstacles, self.config), 1 / 3.0)
         self.assert_reference_cost(trajectory, obstacles)
-
-    def test_heading_cost_front_side_and_rear(self):
-        trajectory = np.zeros((1, 5))
-        for obstacle, expected in (([2.0, 0.0], 1.0),
-                                   ([0.0, 2.0], 0.75),
-                                   ([-2.0, 0.0], 0.5)):
-            self.assertAlmostEqual(dwa.calc_obstacle_cost(
-                trajectory, np.array([obstacle]), self.config), expected)
-
-    def test_heading_cost_uses_closest_pose_and_sums_selected_obstacles(self):
-        trajectory = np.array([[0., 0., 0., 0., 0.],
-                               [4., 0., np.pi / 2, 0., 0.]])
-        obstacles = np.array([[4., 1.], [-2., 0.], [0., 3.]])
-        self.config.closest_dot_quality = 2
-        self.assertAlmostEqual(dwa.calc_obstacle_cost(
-            trajectory, obstacles, self.config), 2.0 + 0.5)
-
-    def test_heading_cost_wraps_angle(self):
-        trajectory = np.array([[0., 0., np.pi - 0.1, 0., 0.]])
-        bearing = -np.pi + 0.1
-        obstacles = 2 * np.array([[np.cos(bearing), np.sin(bearing)]])
-        self.assertAlmostEqual(dwa.calc_obstacle_cost(
-            trajectory, obstacles, self.config), (2.0 - 0.2 / np.pi) / 2)
 
     def test_collision_at_middle_pose_with_different_heading(self):
         self.config.robot_length = 0.3

@@ -43,7 +43,7 @@ class Config:
             self.to_goal_heading_cost_gain = 0.04
 
             self.speed_cost_gain = 0.9
-            self.obstacle_cost_gain = 0.005
+            self.obstacle_cost_gain = 0.05
             self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
 
@@ -55,16 +55,14 @@ class Config:
             self.robot_width = 0.2  # [m] for collision check
             self.robot_length = 0.2  # [m] for collision check
             # obstacles [x(m) y(m), ....]
-
-            self.closest_dot_quality = 10# the nearest n of ob will be considered when calculating obstacle_cost 
         
         else:   #IRL param
                         # robot parameter
             self.max_speed = 0.3  # [m/s]
-            self.min_speed = -0.3  # [m/s]
-            self.max_yaw_rate = 45.0 * math.pi / 180.0  # [rad/s]
+            self.min_speed = -0.1  # [m/s]
+            self.max_yaw_rate = 90.0 * math.pi / 180.0  # [rad/s]
             self.max_accel = 0.2  # [m/ss]
-            self.max_delta_yaw_rate = 45.0 * math.pi / 180.0  # [rad/ss]
+            self.max_delta_yaw_rate = 90.0 * math.pi / 180.0  # [rad/ss]
             self.v_resolution = 0.02  # [m/s]
             self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s]
             self.dt = 0.1  # [s] Time tick for motion prediction
@@ -87,7 +85,8 @@ class Config:
             self.robot_length = 0.23  # [m] for collision check
             # obstacles [x(m) y(m), ....]
 
-            self.closest_dot_quality = 10
+
+
     @property
     def robot_type(self):
         return self._robot_type
@@ -207,12 +206,12 @@ def calc_control_and_trajectory(x, dw, config, goal, ob,goal_heading):
 
 
 def calc_obstacle_cost(trajectory, ob, config):
-    """Sum heading-weighted inverse distances, or inf for a footprint collision."""
+    """Return inverse minimum clearance, or inf for a footprint collision."""
     if np.size(ob) == 0:
         return 0.0
     dx = ob[:, 0, None] - trajectory[:, 0]
     dy = ob[:, 1, None] - trajectory[:, 1]
-    r = np.hypot(dx, dy)#r[obstacle_index,trajectory_idex] = distance
+    r = np.hypot(dx, dy)
 
     if config.robot_type == RobotType.rectangle:
         half_length = config.robot_length / 2
@@ -238,26 +237,8 @@ def calc_obstacle_cost(trajectory, ob, config):
         if (r <= config.robot_radius).any():
             return float("Inf")
 
-    # Select obstacles by their closest distance to the predicted trajectory.
-    min_r_per_obstacle = np.min(r, axis=1)#get the smallest value in each row
-    nearest_indices = np.argsort(min_r_per_obstacle)[:config.closest_dot_quality]# top n nearest_index
-
-    nearest_r = min_r_per_obstacle[nearest_indices]
-    nearest_obstacles = ob[nearest_indices]
-
-    cost = 0.0
-    for index, obstacle, distance in zip(nearest_indices, nearest_obstacles, nearest_r):
-        # Use the position and heading at this obstacle's closest predicted pose.
-        step_index = np.argmin(r[index])
-        pose = trajectory[step_index]
-        obstacle_heading = math.atan2(obstacle[1] - pose[1], obstacle[0] - pose[0])
-        angle_error = obstacle_heading - pose[2]
-        angle = abs(math.atan2(math.sin(angle_error), math.cos(angle_error)))
-
-        # Front: weight 2; side: 1.5; rear: 1. Keep a distance penalty in all directions.
-        cost += np.log2((2.0 - angle / math.pi) / distance)
-    
-    return cost
+    # All points still contribute to clearance, including broad-phase rejects.
+    return 1.0 / np.min(r)
 
 
 def calc_to_goal_cost(trajectory, goal):
