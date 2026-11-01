@@ -104,15 +104,15 @@ class ObstacleCourseNode(Node):
         self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
         self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
         self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
-        self.outlier_offset_threshold = 1
+        self.outlier_offset_threshold = 4
         self.tilt_threshold = 5 # in angular
-        self.close_threshold = 0.7# how close to a deadend triggers transformation to the next _sub_goal
+        self.close_threshold = 1# how close to a deadend triggers transformation to the next _sub_goal
         self.curve_threshold = 20# beyond the angle will not be seen as a single wall
         self.sub_goal_cd =1.0# sub_goal switch cooldown,in seconds
         self.timestamp = 0.0#
         self._segmentation = []
-        self.deadend_check_gap = 20# how many times the timercallback run required for deadend check once
-        self.timer_callback_counter = 1
+        self.deadend_check_gap = 5# how many times the timercallback run required for deadend check once
+        self.timer_callback_counter = 0
 
         if is_simulation:
             self.max_translate_velocity = 0.5
@@ -383,8 +383,8 @@ class ObstacleCourseNode(Node):
 
         self._segmentation = []
 
-        if self.timer_callback_counter % self.deadend_check_gap == 0:
-            self.timer_callback_counter = 1
+        if self.timer_callback_counter % self.deadend_check_gap == 0 and self.timer_callback_counter!=0:
+            self.timer_callback_counter = 0
 
             #Detect deadend_wall and change subgoal
             deadend_wall = self.deadend_detector()
@@ -404,7 +404,7 @@ class ObstacleCourseNode(Node):
                     )
 
                     if (len(self._sub_goal) == 1):
-                        self.set_dwa_param(0.01,0.3,0.01)
+                        self.set_dwa_param(to_goal=0.01,speed=0.3,ob=0.005)
         else:
             self.timer_callback_counter+=1
 

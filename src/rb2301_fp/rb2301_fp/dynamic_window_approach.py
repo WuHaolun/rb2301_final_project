@@ -255,7 +255,8 @@ def calc_obstacle_cost(trajectory, ob, config):
         angle = abs(math.atan2(math.sin(angle_error), math.cos(angle_error)))
 
         # Front: weight 2; side: 1.5; rear: 1. Keep a distance penalty in all directions.
-        cost += (1.0 - angle / math.pi) / distance
+        cost += np.log2((2.0 - angle / math.pi) / distance)
+    
     return cost
 
 
