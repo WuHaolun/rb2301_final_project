@@ -351,10 +351,13 @@ class ObstacleCourseNode(Node):
         self.last_pose = self.pose.copy()
         self.last_timestamp = timestamp
 
-    def set_dwa_param(self,to_goal, speed, ob):  #Update DWA param online
+    def set_dwa_param(self,to_goal, speed, ob, pre_time, v_res):  #Update DWA param online
         self.dwa_config.speed_cost_gain = speed
         self.dwa_config.obstacle_cost_gain = ob
         self.dwa_config.to_goal_heading_cost_gain = to_goal
+
+        self.dwa_config.predict_time = pre_time
+        self.dwa_config.v_resolution = v_res
 
     def timer_callback(self):
         """Controller loop. Insert path planning and PID control logic here"""
@@ -405,7 +408,9 @@ class ObstacleCourseNode(Node):
                     )
 
                     if (len(self._sub_goal) == 1):
-                        self.set_dwa_param(0.1,0.3,0.1)
+                        self.close_threshold /= 2
+                        self.set_dwa_param(0.1,0.2,0.02,1.5,0.01)
+                        self.get_logger().info('dwa param changed')
         else:
             self.timer_callback_counter+=1
 
