@@ -403,7 +403,7 @@ class ObstacleCourseNode(Node):
                     )
 
                     if (len(self._sub_goal) == 1):
-                        self.set_dwa_param(0.05,0.3,0.1)
+                        self.set_dwa_param(0.01,0.3,0.01)
         else:
             self.timer_callback_counter+=1
 
@@ -417,7 +417,7 @@ class ObstacleCourseNode(Node):
                                                                     config=self.dwa_config,
                                                                     )
         self._rviz_predicted_trajectory = predicted_trajectory
-        self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
+        self.move_2D(u[0],0.0,u[1])
         self._state[3] , self._state[4] = u[0], self.actual_velocity[1]    #TODO change this to real speed
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
