@@ -103,7 +103,8 @@ class ObstacleCourseNode(Node):
 
         self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
         self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
-        self.outlier_dot_threshold = 0.7 # The distance from the point with the outlier dot to the fitted line
+        self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
+        self.self.outlier_offset_threshold = 1
         self.tilt_threshold = 5 # in angular
         self.close_threshold = 0.7# how close to a deadend triggers transformation to the next _sub_goal
         self.curve_threshold = 20# beyond the angle will not be seen as a single wall
@@ -466,10 +467,11 @@ class ObstacleCourseNode(Node):
             A, B = vh[1]  # 单位法向量，A²+B²=1
             C = -np.dot([A, B], center)
 
-            distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
+            x_distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
+            y_distance = r = np.hypot(farthest_dot[0]-center[0], farthest_dot[1]-center[1])
             self._segmentation.append(segment)  #add valid segment for animation  
 
-            if distance > self.outlier_dot_threshold:
+            if x_distance > self.outlier_dot_threshold and y_distance < self.outlier_offset_threshold:
                 self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{distance}')
                 return None
 
