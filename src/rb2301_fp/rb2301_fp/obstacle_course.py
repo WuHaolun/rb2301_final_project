@@ -102,12 +102,12 @@ class ObstacleCourseNode(Node):
         self._is_dwa_initialized = False
 
         self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
-        self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
+        self.check_list_threshold = 15 # how many dot needed to start determine if it is a wall
         self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
         self.outlier_offset_threshold = 4
         self.tilt_threshold = 5 # in angular
         self.close_threshold = 1# how close to a deadend triggers transformation to the next _sub_goal
-        self.curve_threshold = 30# beyond the angle will not be seen as a single wall
+        self.curve_threshold = 25# beyond the angle will not be seen as a single wall
         self.sub_goal_cd =1.0# sub_goal switch cooldown,in seconds
         self.timestamp = 0.0#
         self._segmentation = []
@@ -472,7 +472,7 @@ class ObstacleCourseNode(Node):
             self._segmentation.append(segment)  #add valid segment for animation  
 
             if x_distance > self.outlier_dot_threshold and y_distance < self.outlier_offset_threshold:
-                self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{distance}')
+                self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{x_distance}')
                 return None
 
             goal_direction = {
