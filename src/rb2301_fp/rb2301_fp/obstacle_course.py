@@ -107,7 +107,7 @@ class ObstacleCourseNode(Node):
         self.outlier_offset_threshold = 4
         self.tilt_threshold = 5 # in angular
         self.close_threshold = 1# how close to a deadend triggers transformation to the next _sub_goal
-        self.curve_threshold = 20# beyond the angle will not be seen as a single wall
+        self.curve_threshold = 30# beyond the angle will not be seen as a single wall
         self.sub_goal_cd =1.0# sub_goal switch cooldown,in seconds
         self.timestamp = 0.0#
         self._segmentation = []
