@@ -102,13 +102,14 @@ class ObstacleCourseNode(Node):
         self._is_dwa_initialized = False
 
         self.density_threshold = 0.05#the obstacle dot density threshhold for detecting deadend
-        self.check_list_threshold = 25 # how many dot needed to start determine if it is a wall
-        self.outlier_dot_threshold = 0.05 # The distance from the point with the outlier dot to the fitted line
+        self.check_list_threshold = 15 # how many dot needed to start determine if it is a wall
+        self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
+        self.outlier_offset_threshold = 4
         self.tilt_threshold = 5 # in angular
-        self.close_threshold = 0.7# how close to a deadend triggers transformation to the next _sub_goal
-        self.curve_threshold = 20# 
+        self.close_threshold = 1# how close to a deadend triggers transformation to the next _sub_goal
+        self.curve_threshold = 25# beyond the angle will not be seen as a single wall
         self.sub_goal_cd =1.0# sub_goal switch cooldown,in seconds
-        self.timestamp = 0.0
+        self.timestamp = 0.0#
         self._segmentation = []
         self.deadend_check_gap = 10# how many times the timercallback run required for deadend check once
         self.timer_callback_counter = 1
@@ -418,7 +419,7 @@ class ObstacleCourseNode(Node):
                                                                     config=self.dwa_config,
                                                                     )
         self._rviz_predicted_trajectory = predicted_trajectory
-        self.move_2D(np.clip(u[0],0,self.max_translate_velocity),0.0,u[1])
+        self.move_2D(u[0],0.0,u[1])
         self._state[3] , self._state[4] = u[0], self.actual_velocity[1]    #TODO change this to real speed
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
@@ -467,11 +468,12 @@ class ObstacleCourseNode(Node):
             A, B = vh[1]  # 单位法向量，A²+B²=1
             C = -np.dot([A, B], center)
 
-            distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
+            x_distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
+            y_distance = r = np.hypot(farthest_dot[0]-center[0], farthest_dot[1]-center[1])
             self._segmentation.append(segment)  #add valid segment for animation  
 
-            if distance > self.outlier_dot_threshold:
-                #self.get_logger().warn(f'infeasible wall!too short:distance:{distance}')
+            if x_distance > self.outlier_dot_threshold and y_distance < self.outlier_offset_threshold:
+                self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{x_distance}')
                 return None
 
             goal_direction = {
@@ -482,7 +484,7 @@ class ObstacleCourseNode(Node):
             # Reject a wall behind the robot along the current goal direction.
             robot_side = normal @ self.pose[:2] + C
             if robot_side * np.dot(normal, goal_direction) > 0:
-                #self.get_logger().warn(f'infeasible wall!it is behind the robot')
+                self.get_logger().warn(f'infeasible wall!it is behind the robot')
                 return None
 
             vector_1 = vh[0]
@@ -494,7 +496,7 @@ class ObstacleCourseNode(Node):
             angle_deg = self.measure_angle(vector_1,vector_2)
             # A blocking wall is perpendicular to travel; SVD signs are arbitrary.
             if abs(angle_deg - 90.0) > self.tilt_threshold:
-                #self.get_logger().warn(f'infeasible wall!it is not in good angle')
+                self.get_logger().warn(f'infeasible wall!it is not in good angle')
                 return None
             
             return (A,B,C)
@@ -502,8 +504,8 @@ class ObstacleCourseNode(Node):
         # Find the global extreme before accepting any candidate segment.
         farthest_dot=self.pose[:2]
         last_dot = None
-        double_ob = np.concatenate((self._ob, self._ob), axis=0)
-        for dot in double_ob:
+        
+        for dot in self._ob:
             if self._sub_goal[-1] == '+x':# update the farthest dot
                 if dot[0]>farthest_dot[0]:
                     farthest_dot = dot
@@ -522,7 +524,10 @@ class ObstacleCourseNode(Node):
         continuous_list=[]
         aver_hist_vector = None
         fracture = False
-        for dot in double_ob:
+
+        cache_segment=[]
+        fractured_flag = False
+        for dot in self._ob:
             if last_dot is not None:
                 distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
 
@@ -542,9 +547,14 @@ class ObstacleCourseNode(Node):
                 if result is not None:
                     return result
                 continuous_list=[dot]
+                fractured_flag = True
             else:
-                continuous_list.append(dot)
+                if fractured_flag == False:
+                    cache_segment.append(dot)
+                else:
+                    continuous_list.append(dot)
             last_dot = dot
+        continuous_list =continuous_list + cache_segment
         return check_segment(continuous_list,farthest_dot)
 
 def main(args=None):

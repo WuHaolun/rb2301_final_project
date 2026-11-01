@@ -110,6 +110,8 @@ class CollisionCheckingTests(unittest.TestCase):
         self.assert_reference_cost(trajectory, obstacles)
 
     def test_collision_at_middle_pose_with_different_heading(self):
+        self.config.robot_length = 0.3
+        self.config.robot_width = 0.1
         trajectory = np.array([
             [0.0, 0.0, 0.0, 0.0, 0.0],
             [1.0, 0.0, np.pi / 2, 0.0, 0.0],
