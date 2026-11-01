@@ -409,7 +409,7 @@ class ObstacleCourseNode(Node):
 
                     if (len(self._sub_goal) == 1):
                         self.close_threshold /= 2
-                        self.set_dwa_param(0.1,0.2,0.02,1.5,0.01)
+                        self.set_dwa_param(0.01,0.5,0.05,2.0,0.01)
                         self.get_logger().info('dwa param changed')
         else:
             self.timer_callback_counter+=1

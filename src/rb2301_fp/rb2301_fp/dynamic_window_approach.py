@@ -40,9 +40,9 @@ class Config:
             self.predict_time = 2.5  # [s]
 
             self.to_goal_cost_gain = 0.10
-            self.to_goal_heading_cost_gain = 0.04
+            self.to_goal_heading_cost_gain = 0.02
 
-            self.speed_cost_gain = 0.9
+            self.speed_cost_gain = 1.7
             self.obstacle_cost_gain = 0.05
             self.robot_stuck_flag_cons = 0.0001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
@@ -185,7 +185,7 @@ def calc_control_and_trajectory(x, dw, config, goal, ob,goal_heading):
             if goal is not None:
                 to_goal_cost = config.to_goal_cost_gain * calc_to_goal_cost(trajectory, goal)
 
-            speed_cost = config.speed_cost_gain * (config.max_speed - trajectory[-1, 3])
+            speed_cost = config.speed_cost_gain * (config.max_speed - abs(trajectory[-1, 3]))
             ob_cost = config.obstacle_cost_gain * calc_obstacle_cost(trajectory, ob, config)
 
             final_cost = to_goal_cost + speed_cost + ob_cost
