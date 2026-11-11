@@ -14,6 +14,47 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+#=============================== Parameters: edit here =========================================
+# Defaults for the planner node (./gp.sh) and the controller's path following (./fp.sh).
+# The ones marked (ROS) can also be overridden at startup with --ros-args -p name:=value.
+
+# Map
+GRID_RESOLUTION = 0.05          # [m] cell size (ROS: grid_resolution)
+GRID_HALF_SIZE = 10.0           # [m] grid is 2x this wide, centred on the first pose (ROS: grid_half_size)
+MAPPING_RANGE = 3.5             # [m] beams are cut here; no hit is marked beyond it (ROS: mapping_range)
+MAX_MAPPING_YAW_RATE = 0.5      # [rad/s] skip scans while turning faster, against pose/scan skew (ROS: max_mapping_yaw_rate)
+SCAN_STEP = 2                   # keep every Nth LiDAR beam (ROS: scan_step)
+HIT_EVIDENCE = 0.85             # log-odds added to a cell a beam ends in
+MISS_EVIDENCE = 0.4             # log-odds removed from a cell a beam passes through
+MAX_EVIDENCE = 2.0              # log-odds clamp; lower = moved obstacles clear faster
+OCCUPIED_THRESHOLD = 0.6        # log-odds above this is an obstacle (unknown = 0 = free)
+
+# Inflation
+ROBOT_HALF_WIDTH = 0.12         # [m] (ROS: robot_half_width)
+INFLATION_MARGIN = 0.04         # [m] half width + margin is impassable (ROS: inflation_margin)
+COST_RADIUS = 0.30              # [m] soft cost decays to 0 here; keeps paths mid-corridor (ROS: cost_radius)
+
+# A*
+COST_WEIGHT = 3.0               # step cost = length * (1 + COST_WEIGHT * soft cost) (ROS: cost_weight)
+MAX_EXPANSIONS = 400000         # search limit per plan
+PATH_SPACING = 0.1              # [m] spacing of the published path points (ROS: path_spacing)
+
+# Node timing
+MAP_UPDATE_RATE = 5.0           # [Hz] (ROS: map_update_rate)
+PLAN_RATE = 1.0                 # [Hz] (ROS: plan_rate)
+LOG_PERIOD = 10.0               # [s] between timing log lines
+
+# LiDAR mounting from nanocar_description.urdf, same as ObstacleCourseNode.update_ob
+LIDAR_OFFSET = 0.11423          # [m] forward of the pose
+LIDAR_YAW = 3.1416              # [rad]
+
+# Path following (controller side)
+PATH_LOOKAHEAD = 0.8            # [m] along the path to the DWA waypoint (ROS on fp.sh: path_lookahead)
+PATH_TIMEOUT = 3.0              # [s] older paths are ignored, DWA gets the final goal (ROS on fp.sh: path_timeout)
+PATH_SEARCH_WINDOW = 3.0        # [m] closest path point is only searched this far along, so a folded path cannot jump ahead
+PATH_GOAL_TOLERANCE = 0.3       # [m] a path ending this close to the final goal counts as reaching it
+#================================================================================================
+
 _SQRT2 = math.sqrt(2.0)
 
 
@@ -40,9 +81,9 @@ class OccupancyGrid():
     obstacle that has moved away is cleared again. Unknown cells (log-odds 0)
     count as free.
     '''
-    def __init__(self, center, resolution:float=0.05, half_size:float=10.0,
-                 hit_evidence:float=0.85, miss_evidence:float=0.4,
-                 max_evidence:float=2.0, occupied_threshold:float=0.6):
+    def __init__(self, center, resolution:float=GRID_RESOLUTION, half_size:float=GRID_HALF_SIZE,
+                 hit_evidence:float=HIT_EVIDENCE, miss_evidence:float=MISS_EVIDENCE,
+                 max_evidence:float=MAX_EVIDENCE, occupied_threshold:float=OCCUPIED_THRESHOLD):
         if resolution <= 0 or half_size <= 0:
             raise ValueError('resolution and half_size must be positive')
         self.resolution = float(resolution)
@@ -121,7 +162,8 @@ class CostMap():
     cost_radius the cost decays linearly from 1 to 0, which keeps paths in the
     middle of corridors.
     '''
-    def __init__(self, resolution:float, inflation_radius:float=0.16, cost_radius:float=0.30):
+    def __init__(self, resolution:float=GRID_RESOLUTION, inflation_radius:float=ROBOT_HALF_WIDTH + INFLATION_MARGIN,
+                 cost_radius:float=COST_RADIUS):
         if cost_radius < inflation_radius:
             raise ValueError('cost_radius must be at least inflation_radius')
         self.resolution = resolution
@@ -171,7 +213,7 @@ class AStarPlanner():
 
     Step cost = step length * (1 + cost_weight * soft_cost of the cell entered).
     '''
-    def __init__(self, cost_weight:float=3.0, max_expansions:int=400000):
+    def __init__(self, cost_weight:float=COST_WEIGHT, max_expansions:int=MAX_EXPANSIONS):
         self.cost_weight = cost_weight
         self.max_expansions = max_expansions
         self.expansions = 0
@@ -292,9 +334,9 @@ class AStarPlanner():
 
 class GlobalPlanner():
     '''Map + inflation + A*: the whole planner behind one object (used by the ROS node).'''
-    def __init__(self, center, resolution:float=0.05, half_size:float=10.0,
-                 robot_half_width:float=0.12, inflation_margin:float=0.04,
-                 cost_radius:float=0.30, cost_weight:float=3.0, path_spacing:float=0.1):
+    def __init__(self, center, resolution:float=GRID_RESOLUTION, half_size:float=GRID_HALF_SIZE,
+                 robot_half_width:float=ROBOT_HALF_WIDTH, inflation_margin:float=INFLATION_MARGIN,
+                 cost_radius:float=COST_RADIUS, cost_weight:float=COST_WEIGHT, path_spacing:float=PATH_SPACING):
         self.grid = OccupancyGrid(center, resolution, half_size)
         self.costmap = CostMap(resolution, robot_half_width + inflation_margin, cost_radius)
         self.astar = AStarPlanner(cost_weight)
@@ -338,12 +380,12 @@ class PathFollower():
     Falls back to the final goal when there is no path, the path is empty, or it
     is older than timeout. Times are in seconds from any monotonic clock.
     '''
-    def __init__(self, lookahead:float=0.8, timeout:float=3.0, search_window:float=3.0,
-                 goal_tolerance:float=0.3):
+    def __init__(self, lookahead:float=PATH_LOOKAHEAD, timeout:float=PATH_TIMEOUT,
+                 search_window:float=PATH_SEARCH_WINDOW, goal_tolerance:float=PATH_GOAL_TOLERANCE):
         self.lookahead = lookahead
         self.timeout = timeout
-        self.search_window = search_window # only look for the closest point this far along the path, so a folded path cannot jump ahead
-        self.goal_tolerance = goal_tolerance # a path ending this close to the final goal is treated as reaching it
+        self.search_window = search_window
+        self.goal_tolerance = goal_tolerance
         self.path = np.empty((0, 2))
         self.stamp = None
         self.waypoint = None # last waypoint taken from the path, None when falling back

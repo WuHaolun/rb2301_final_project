@@ -19,13 +19,10 @@ from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import LaserScan
 
+from rb2301_fp import global_planner_core as params # all defaults live at the top of global_planner_core.py
 from rb2301_fp.global_planner_core import GlobalPlanner
 from rb2301_fp.obstacle_course import (LidarNode, load_frame, optitrack_to_maze,
                                        robot_number_from_domain, yaw_from_quaternion)
-
-# LiDAR mounting from nanocar_description.urdf, same as ObstacleCourseNode.update_ob
-LIDAR_OFFSET = 0.11423 # [m] forward of the pose
-LIDAR_YAW = 3.1416 # [rad]
 
 
 class GlobalPlannerNode(Node):
@@ -36,20 +33,20 @@ class GlobalPlannerNode(Node):
         self.is_simulation = is_simulation
 
         #======Parameters======#
-        self.resolution = self.declare_parameter('grid_resolution', 0.05).value # [m] per cell
-        self.half_size = self.declare_parameter('grid_half_size', 10.0).value # [m], grid centred on the first pose
-        self.mapping_range = self.declare_parameter('mapping_range', 3.5).value # [m] beams are cut here
-        self.max_mapping_yaw_rate = self.declare_parameter('max_mapping_yaw_rate', 0.5).value # [rad/s] skip scans while turning faster
-        self.robot_half_width = self.declare_parameter('robot_half_width', 0.12).value # [m]
-        self.inflation_margin = self.declare_parameter('inflation_margin', 0.04).value # [m] added to the half width: impassable
-        self.cost_radius = self.declare_parameter('cost_radius', 0.30).value # [m] decaying cost out to here
-        self.cost_weight = self.declare_parameter('cost_weight', 3.0).value
-        self.path_spacing = self.declare_parameter('path_spacing', 0.1).value # [m]
-        self.scan_step = self.declare_parameter('scan_step', 2).value # keep every Nth beam
-        map_update_rate = self.declare_parameter('map_update_rate', 5.0).value # [Hz]
-        plan_rate = self.declare_parameter('plan_rate', 1.0).value # [Hz]
+        self.resolution = self.declare_parameter('grid_resolution', params.GRID_RESOLUTION).value
+        self.half_size = self.declare_parameter('grid_half_size', params.GRID_HALF_SIZE).value
+        self.mapping_range = self.declare_parameter('mapping_range', params.MAPPING_RANGE).value
+        self.max_mapping_yaw_rate = self.declare_parameter('max_mapping_yaw_rate', params.MAX_MAPPING_YAW_RATE).value
+        self.robot_half_width = self.declare_parameter('robot_half_width', params.ROBOT_HALF_WIDTH).value
+        self.inflation_margin = self.declare_parameter('inflation_margin', params.INFLATION_MARGIN).value
+        self.cost_radius = self.declare_parameter('cost_radius', params.COST_RADIUS).value
+        self.cost_weight = self.declare_parameter('cost_weight', params.COST_WEIGHT).value
+        self.path_spacing = self.declare_parameter('path_spacing', params.PATH_SPACING).value
+        self.scan_step = self.declare_parameter('scan_step', params.SCAN_STEP).value
+        map_update_rate = self.declare_parameter('map_update_rate', params.MAP_UPDATE_RATE).value
+        plan_rate = self.declare_parameter('plan_rate', params.PLAN_RATE).value
         self.frame_id = self.declare_parameter('visualization_frame', 'fp_visualization').value
-        self.log_period = 10.0 # [s] between timing log lines
+        self.log_period = params.LOG_PERIOD
 
         #======State======#
         self.planner = None # GlobalPlanner, created at the first pose so the grid is centred on it
@@ -129,12 +126,12 @@ class GlobalPlannerNode(Node):
         '''Returns (sensor_xy, endpoints, is_hit) in the pose frame; invalid/infinite beams are dropped.'''
         r = np.asarray(msg.ranges, dtype=float)[::self.scan_step]
         yaw = math.radians(pose[2])
-        a = msg.angle_min + np.arange(r.size) * msg.angle_increment * self.scan_step + LIDAR_YAW + yaw
+        a = msg.angle_min + np.arange(r.size) * msg.angle_increment * self.scan_step + params.LIDAR_YAW + yaw
         valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
         r, a = r[valid], a[valid]
         is_hit = r <= self.mapping_range
         r = np.minimum(r, self.mapping_range)
-        sensor = np.array((pose[0] + LIDAR_OFFSET * math.cos(yaw), pose[1] + LIDAR_OFFSET * math.sin(yaw)))
+        sensor = np.array((pose[0] + params.LIDAR_OFFSET * math.cos(yaw), pose[1] + params.LIDAR_OFFSET * math.sin(yaw)))
         return sensor, sensor + np.column_stack((r * np.cos(a), r * np.sin(a))), is_hit
 
     def map_timer_callback(self):

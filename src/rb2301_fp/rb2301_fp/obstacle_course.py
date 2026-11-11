@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from typing import List, Tuple
 from rb2301_fp import dynamic_window_approach
-from rb2301_fp.global_planner_core import PathFollower
+from rb2301_fp.global_planner_core import PATH_LOOKAHEAD, PATH_TIMEOUT, PathFollower
 
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
@@ -257,8 +257,8 @@ class ObstacleCourseNode(Node):
         """Publish the frozen goal for the planner and follow its path with a lookahead waypoint."""
         self.use_global_path = self.declare_parameter('use_global_path', True).value
         self.path_follower = PathFollower(
-            lookahead=self.declare_parameter('path_lookahead', 0.8).value,
-            timeout=self.declare_parameter('path_timeout', 3.0).value)
+            lookahead=self.declare_parameter('path_lookahead', PATH_LOOKAHEAD).value, # defaults: top of global_planner_core.py
+            timeout=self.declare_parameter('path_timeout', PATH_TIMEOUT).value)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.goal_publisher = self.create_publisher(PointStamped, 'global_goal', latched)
