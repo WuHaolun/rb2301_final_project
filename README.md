@@ -47,7 +47,25 @@ To disable both static and moving obstacles while keeping the maze walls and gat
 
 The launch argument defaults to `false`, so `./gz_fp.sh` still generates obstacles.
 
-The unchanged starter code just drives forward at 0.1 m/s.
+The controller currently defaults to a single fixed point goal. At the first
+valid pose, it places the goal 5 m away, 35 degrees left of the initial course
+direction (`+x` in simulation, `-y` on the real robot). This is relative to the
+initial position and the configured course direction, not the robot's yaw.
+The goal remains fixed as the robot moves. DWA uses the point-goal weights in
+`dynamic_window_approach.Config`; deadend, gate and stage switching are bypassed.
+Within 0.3 m of the goal, the controller stops and stays stopped.
+
+The distance and angle are startup parameters (use decimal values):
+
+```bash
+bash fp.sh --ros-args -p point_goal_distance:=5.0 -p point_goal_left_angle_deg:=35.0
+```
+
+To restore the previous sub-goal/stage logic:
+
+```bash
+bash fp.sh --ros-args -p single_point_goal:=false
+```
 
 ## RViz visualization (including a node started over SSH)
 
@@ -252,3 +270,13 @@ What is different from the simulation:
 - **Robot number.** The node reads the Optitrack topic of its own robot from `ROS_DOMAIN_ID` (already set on each robot) and prints it at start-up (`/vrpn_mocap/bingda_0NN/pose`).
 - **Rigid bodies** are created in Motive with the robot facing +y of the CA2 maze. If you reset one, face the robot +y first.
 - **Checking the pose.** Run the node with `--calibrate`, for example `./fp.sh --calibrate` on the robot. It prints the raw Optitrack pose and the maze-frame pose twice a second and never sends a drive command, so you can move the robot by hand and read off coordinates (for example the position of the gate). Start `rplidar` first, otherwise the node waits for the LiDAR.
+
+
+
+
+
+Rviz connection: 
+/home/fro4ten/Documents/rb2301_final_project/rviz_fp.sh \
+  --ssh bingda@192.168.1.20x
+
+bash fp.sh --ros-args -p visualization_transport:=ssh

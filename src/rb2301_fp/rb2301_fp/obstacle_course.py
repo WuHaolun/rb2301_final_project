@@ -102,8 +102,8 @@ class Goal():
 #============================================node==================================================================================
 class ObstacleCourseNode(Node):
     '''Node to navigate obstacle course, using pose from either gazebo odometer or optitrack and lidar scan data'''
-    def __init__(self, is_simulation:bool=True, calibrate:bool=False):
-        super().__init__('obstaclecourse')
+    def __init__(self, is_simulation:bool=True, calibrate:bool=False, *, parameter_overrides=None):
+        super().__init__('obstaclecourse', parameter_overrides=parameter_overrides)
         self.get_logger().info("Starting ObstacleCourseNode")
 
         self.is_simulation = is_simulation
@@ -121,21 +121,45 @@ class ObstacleCourseNode(Node):
         #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
         self._goal = Goal()
 
+
+        # Temporary single-goal mode; disable the parameter to restore course stages.
+        self.single_point_goal = self.declare_parameter('single_point_goal', True).value
+        if is_simulation:
+            self.point_goal_distance = self.declare_parameter('point_goal_distance', 8.0).value
+            self.point_goal_left_angle_deg = self.declare_parameter(
+                'point_goal_left_angle_deg', -35.0).value
+        else:
+            self.point_goal_distance = self.declare_parameter('point_goal_distance', 8.0).value
+            self.point_goal_left_angle_deg = self.declare_parameter(
+                'point_goal_left_angle_deg', 155.0).value
+
+
+        
+        if (not math.isfinite(self.point_goal_distance) or self.point_goal_distance <= 0
+                or not math.isfinite(self.point_goal_left_angle_deg)):
+            raise ValueError('point_goal_distance must be positive and goal settings must be finite')
+        self._point_goal_reached = False
+
         if self.is_simulation == False:
-            self._sub_goal = ['-y','-x','-y']# sub_goal_heading, in reverse order
+            self._sub_goal = ['-y','-x','+y']# sub_goal_heading, in reverse order
             self._sub_goal_2 = ['-y']
         else:
             self._sub_goal = ['+x','-y','+x']
             self._sub_goal_2 = ['+x']
-        self._goal.goal_heading = self._sub_goal[-1]
+        self._initial_goal_heading = self._sub_goal[-1]
+        if not self.single_point_goal:
+            self._goal.goal_heading = self._initial_goal_heading
         self._start_stage_started = False
         self._gate_stage_started = False
         self._final_stage_started = False
 
         self._trajectory = np.array(self._state)
         self._ob = np.array([]) #obstacle array
+        self.scan_step = 2 # LiDAR downsampling: keep every Nth beam (1 = all, 2 = half, 4 = quarter)
         self._is_dwa_initialized = False
 
+
+        #======Deadend checker and goal switch params======#
         self.density_threshold = 0.25#the obstacle dot density threshhold for detecting deadend
         self.check_list_threshold = 15 # how many dot needed to start determine if it is a wall
         self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
@@ -157,7 +181,8 @@ class ObstacleCourseNode(Node):
         self.gate_mse_threshold = 0.1
         self.min_gate_width_threshold=0.6
         self.max_gate_width_threshold=0.8
-        self.stage = 'start'#start gate final
+        self.stage = 'point_goal' if self.single_point_goal else 'start'
+        
         if is_simulation:
             self.max_translate_velocity = 0.5
         else:
@@ -247,7 +272,7 @@ class ObstacleCourseNode(Node):
         scene = MarkerArray()
 
         predicted = self._rviz_predicted_trajectory
-        if (self.calibrate or not self._sub_goal or self._ob.size == 0
+        if (self.calibrate or (not self.single_point_goal and not self._sub_goal) or self._ob.size == 0
                 or (predicted is not None and len(predicted) < 2)):
             predicted = None
         scene.markers.append(self._rviz_marker(
@@ -261,7 +286,7 @@ class ObstacleCourseNode(Node):
             'obstacles', Marker.POINTS, np.asarray(self._ob).reshape(-1, 2),
             (0.1, 0.1, 0.1), 0.035, stamp))
 
-        # Blue cross, as in animate(); DWA currently follows _sub_goal instead.
+        # Blue cross marks the active point goal.
         goal = [] if self._goal.goal_node is None else np.asarray(self._goal.goal_node) + np.array(
             [[-0.1, -0.1], [0.1, 0.1], [-0.1, 0.1], [0.1, -0.1]])
         scene.markers.append(self._rviz_marker(
@@ -321,23 +346,21 @@ class ObstacleCourseNode(Node):
             self._rviz_server.close()
         return super().destroy_node()
 
+
+#========Utilities=======#
     def sub_scan_callback(self, msg):
         """Scan subscriber"""
-        if len(msg.ranges) <= 720:#was 360,choose whether want downsampling
-            self.last_scan = np.array(msg.ranges)
-        else:
-            self.last_scan = np.array(msg.ranges)[::2]
-
+        self.last_scan = np.array(msg.ranges)[::self.scan_step]
         self.update_ob(msg)
 
     def update_ob(self,msg):
         if self.pose is None:
             return
         r = self.last_scan
-        step = 2 if len(msg.ranges) > 720 else 1
         yaw = np.deg2rad(self.pose[2])
         # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
-        a = msg.angle_min + np.arange(r.size) * msg.angle_increment * step + 3.1416 + yaw
+        # Each kept beam is scan_step raw beams apart, so the angle step scales with it.
+        a = msg.angle_min + np.arange(r.size) * msg.angle_increment * self.scan_step + 3.1416 + yaw
         valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
         x = self.pose[0] + 0.11423 * np.cos(yaw)
         y = self.pose[1] + 0.11423 * np.sin(yaw)
@@ -357,6 +380,7 @@ class ObstacleCourseNode(Node):
         self.raw_pose = np.array((x,y,heading))
         x, y, heading = optitrack_to_maze(x, y, heading, self.frame) # CA2 maze frame, see optitrack_variables.config
         self.pose = np.array((x,y,heading))
+        self._initialize_point_goal()
         self.update_actual_velocity(msg.header.stamp)
         return self.pose
 
@@ -371,6 +395,7 @@ class ObstacleCourseNode(Node):
         latest_pose_msg = msg.pose.pose
         heading = np.rad2deg(self.yaw_from_quaternion(latest_pose_msg.orientation))
         self.pose = np.array((latest_pose_msg.position.x, latest_pose_msg.position.y, heading))
+        self._initialize_point_goal()
         self.update_actual_velocity(msg.header.stamp)
         return self.pose
 
@@ -384,6 +409,21 @@ class ObstacleCourseNode(Node):
         twist_msg.angular.x, twist_msg.angular.y, twist_msg.angular.z = 0.0, 0.0, float(turn)
         self.publisher_.publish(twist_msg)
 
+    def _initialize_point_goal(self):
+        """Freeze one target relative to the first pose and initial course direction."""
+        if (not self.single_point_goal or self._goal.goal_node is not None
+                or self.pose is None or not np.isfinite(self.pose).all()):
+            return
+        forward_yaw = {'+x': 0.0, '-x': math.pi,
+                       '+y': math.pi / 2, '-y': -math.pi / 2}[self._initial_goal_heading]
+        angle = forward_yaw + math.radians(self.point_goal_left_angle_deg)
+        offset = self.point_goal_distance * np.array([math.cos(angle), math.sin(angle)])
+        self._goal.goal_node = self.pose[:2] + offset
+        self.get_logger().info(
+            f'Fixed point goal: {self._goal.goal_node}, '
+            f'{self.point_goal_distance} m at {self.point_goal_left_angle_deg} deg left '
+            f'of initial {self._initial_goal_heading}; course switching disabled')
+
     def is_goal_reached(self,threshold = 0.3)->bool:
         if self._goal.goal_node is None:
             return False
@@ -395,7 +435,7 @@ class ObstacleCourseNode(Node):
 
     def update_state(self)->np.ndarray:
         """update speed and orientation using pose[], keep vel and omega"""
-        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self._state[3], self._state[4]])
+        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self.actual_velocity[0], self.actual_velocity[1] ])
 
     def update_actual_velocity(self, stamp):
         """use differentiation of position to estimate the forward speed(m/s) and angular speed(rad/s)"""
@@ -450,8 +490,22 @@ class ObstacleCourseNode(Node):
         self.set_dwa_param(to_goal_node=0.5,speed=1,ob=0.2,pre_time=1.5,v_res=0.01)
         self.get_logger().info('enter gate stage!dwa param changed')
 #===============================timer_callback=====================================================
-    def timer_callback(self):
-        """Controller loop. Insert path planning and PID control logic here"""
+    def timer_callback(self):   #timer callback framework for performance evaluation
+        callback_started = time.perf_counter()
+        timings = {'DWA': None, 'deadend_detect': None}
+        try:
+            self._run_timer_callback(timings)
+        finally:
+            callback_ms = (time.perf_counter() - callback_started) * 1000.0
+            phases = ', '.join(
+                f'{name}={elapsed * 1000.0:.3f} ms' if elapsed is not None
+                else f'{name}=skipped'
+                for name, elapsed in timings.items())
+            self.get_logger().info(
+                f'Performance: {phases}, timer_callback={callback_ms:.3f} ms')
+
+    def _run_timer_callback(self, timings): #real timer_callback
+        """Controller loop; deadend timing includes segmentation and wall fitting."""
         if self.pose is None:
             print("No pose detected")
             return # Does not run if no pose received from Odom or Optitrack
@@ -465,25 +519,43 @@ class ObstacleCourseNode(Node):
 
         #self.get_logger().info(f"Pose: {self.pose}")
 
+        self._initialize_point_goal()
+        
+        if self.single_point_goal:
+            if self._goal.goal_node is None:
+                self.move_2D()
+                return
+            if self._point_goal_reached or self.is_goal_reached():
+                self._point_goal_reached = True
+                self.stage = 'done'
+                self._rviz_predicted_trajectory = None
+                self._state[3:] = 0.0
+                self.move_2D()
+                return
+
         #DWA integration
         if self.pose is None or self._ob.size == 0 or self.actual_velocity is None:
             return
-        self._state = self.update_state()
-
-        if not self._sub_goal:
+        if not self.single_point_goal and not self._sub_goal:
             self.move_2D()
             return
+        
+        self._state = self.update_state()   #Update the state
 
-        if self.stage == 'start':
+        if not self.single_point_goal and self.stage == 'start':
             self.start_stage()
             if self.timer_callback_counter % self.deadend_check_gap == 0:
                 self.timer_callback_counter = 1
-                self._segmentation = []
-                self.segment_chipper()#genrate _segmentation
-                self.wall_list=[]
-                self.wall_generator()
-                #Detect deadend_wall and change subgoal
-                deadend_wall = self.deadend_detector()
+                deadend_started = time.perf_counter()
+                try:
+                    self._segmentation = []
+                    self.segment_chipper()#genrate _segmentation
+                    self.wall_list=[]
+                    self.wall_generator()
+                    #Detect deadend_wall and change subgoal
+                    deadend_wall = self.deadend_detector()
+                finally:
+                    timings['deadend_detect'] = time.perf_counter() - deadend_started
 
                 # Only the final sub-goal searches for the exit gate.
                 gate = self.gate_detector("+x")
@@ -507,30 +579,36 @@ class ObstacleCourseNode(Node):
                 self.timer_callback_counter+=1
 
 
-        if self.stage == 'gate':
+        if not self.single_point_goal and self.stage == 'gate':
             self.gate_stage()
             if self.is_goal_reached():
                 self._goal.goal_node = None
                 self.get_logger().info('gate reached')
                 self.stage = 'final'
 
-        if self.stage == 'final':
+
+        if not self.single_point_goal and self.stage == 'final':
             self._goal.goal_heading = self._sub_goal_2[-1]
             self.final_stage()
 
+
+
 #===========================DWA======================================================================
         self._trajectory = np.vstack((self._trajectory, self._state))
-        u, predicted_trajectory = dynamic_window_approach.dwa_control(
-                                                                    self,
-                                                                    x=self._state,
-                                                                    goal=self._goal.goal_node,
-                                                                    goal_heading= self._goal.goal_heading,
-                                                                    ob=self._ob,
-                                                                    config=self.dwa_config,
-                                                                    )
+        dwa_started = time.perf_counter()
+        try:
+            u, predicted_trajectory = dynamic_window_approach.dwa_control(
+                self,
+                x=self._state,
+                goal=self._goal.goal_node,
+                goal_heading=None if self.single_point_goal else self._goal.goal_heading,
+                ob=self._ob,
+                config=self.dwa_config,
+            )
+        finally:
+            timings['DWA'] = time.perf_counter() - dwa_started
         self._rviz_predicted_trajectory = predicted_trajectory
         self.move_2D(u[0],0.0,u[1])
-        self._state[3] , self._state[4] = u[0], self.actual_velocity[1]    #TODO change this to real speed
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
 
