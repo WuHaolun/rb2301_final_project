@@ -32,7 +32,7 @@ class Config:
         if is_simulation:
             # robot parameter
             self.max_speed = 0.4  # [m/s]
-            self.min_speed = -0.1  # [m/s]
+            self.min_speed = -0.0  # [m/s]
             #self.max_yaw_rate = 90.0 * math.pi / 180.0  # [rad/s]
 
             self.max_yaw_rate = 1.0
@@ -60,7 +60,7 @@ class Config:
             self.obstacle_cost_gain = 0.1
             self.obstacle_turn_cost_gain = 1.2
 
-            self.robot_stuck_flag_cons = 0.012  #was 0.001 constant to prevent robot stucked
+            self.robot_stuck_flag_cons = 0.0000012  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
 
             # if robot_type == RobotType.circle
@@ -102,7 +102,7 @@ class Config:
             self.obstacle_cost_gain = 0.3
             self.obstacle_turn_cost_gain = 1.5
 
-            self.robot_stuck_flag_cons = 0.001  #was 0.001 constant to prevent robot stucked
+            self.robot_stuck_flag_cons = 0.00000001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
 
             # if robot_type == RobotType.circle

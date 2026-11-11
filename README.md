@@ -213,6 +213,44 @@ To disable visualization:
 ./fp.sh --ros-args -p visualization_enabled:=false
 ```
 
+## Global planner (optional third process)
+
+`global_planner` builds an occupancy grid from the LiDAR and pose, runs A* to the
+controller's fixed goal about once a second, and publishes `nav_msgs/Path` on
+`global_path`. The controller then hands DWA a waypoint `path_lookahead` metres
+along that path instead of the far goal. Without a fresh path (planner not
+running, empty path, or older than `path_timeout`), the controller passes the
+final goal exactly as before. The core is in `global_planner_core.py` (no ROS),
+the node in `global_planner.py`.
+
+Simulation, three terminals in the workspace folder:
+
+```bash
+./gz_fp.sh
+./fp.sh
+./gp.sh
+```
+
+Real robot: run `./gp.sh` in an extra tmux pane next to `fp.sh`. It detects
+simulation vs. robot and reads the Optitrack pose the same way as the controller.
+RViz shows the path (magenta) and the current waypoint (orange).
+
+Controller parameters (`./fp.sh --ros-args -p name:=value`):
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `use_global_path` | `true` | `false` ignores the path; DWA gets the final goal as before |
+| `path_lookahead` | `0.8` | metres along the path to the DWA waypoint |
+| `path_timeout` | `3.0` | seconds before a path counts as stale |
+
+Planner parameters (`./gp.sh --ros-args -p name:=value`): `grid_resolution`
+(0.05 m), `grid_half_size` (10 m, grid centred on the first pose),
+`mapping_range` (3.5 m), `max_mapping_yaw_rate` (0.5 rad/s, scans taken while
+turning faster are skipped), `robot_half_width` (0.12 m) + `inflation_margin`
+(0.04 m) as impassable inflation, `cost_radius` (0.3 m) and `cost_weight` (3.0)
+for the soft cost that keeps paths mid-corridor, `map_update_rate` (5 Hz),
+`plan_rate` (1 Hz). It logs map-update and planning times every 10 s.
+
 ## The simulation map
 
 - Each time you launch, the map is randomised from `obstacle_modifier.py`: gate position, zig-zag size, obstacle speed, and the position of the static obstacles. Switch each one on or off with the `randomise_...` variables at the top of that file.

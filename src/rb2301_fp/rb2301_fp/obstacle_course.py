@@ -7,12 +7,13 @@ import numpy as np
 import rclpy
 from typing import List, Tuple
 from rb2301_fp import dynamic_window_approach
+from rb2301_fp.global_planner_core import PathFollower
 
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy, QoSProfile, qos_profile_sensor_data
-from geometry_msgs.msg import Point, PoseStamped
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Point, PointStamped, PoseStamped
+from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import ColorRGBA
@@ -56,6 +57,17 @@ def load_frame(robot_number:int) -> tuple:
         frame["heading_offset_deg"] = parser.getfloat("heading_offsets", str(robot_number))
     course = {k: parser.getfloat("course", k, fallback=0.0) for k in ("origin_x", "origin_y", "rotation_deg")}
     return frame, course
+
+def robot_number_from_domain(default:int=3) -> int:
+    '''On the Bingda robots ROS_DOMAIN_ID is the robot's number, so the Optitrack topic is picked automatically.'''
+    domain = os.environ.get("ROS_DOMAIN_ID", "")
+    return int(domain) if domain.isdigit() and 1 <= int(domain) <= 99 else default
+
+def yaw_from_quaternion(q) -> float:
+    '''Returns yaw angle (in rad) for orientation based on given quaternion input q'''
+    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+    return np.arctan2(siny_cosp, cosy_cosp)
 
 
 class LidarNode(Node):
@@ -195,9 +207,7 @@ class ObstacleCourseNode(Node):
             self.subscription = self.create_subscription(Odometry, 'odom', self.odometer_callback, qos_profile_sensor_data)
         else:
             qos_profile = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
-            # On the Bingda robots ROS_DOMAIN_ID is the robot's number, so the Optitrack topic is picked automatically
-            domain = os.environ.get("ROS_DOMAIN_ID", "")
-            self.robot_number = int(domain) if domain.isdigit() and 1 <= int(domain) <= 99 else 3
+            self.robot_number = robot_number_from_domain()
             self.frame, self.course = load_frame(self.robot_number)
             self.get_logger().info(f"Reading pose from /vrpn_mocap/bingda_{self.robot_number:03d}/pose")
 
@@ -213,6 +223,7 @@ class ObstacleCourseNode(Node):
 
         self.pose = None
         self.init_rviz_visualization()
+        self.init_global_path()
 #==============================================================================================================
     # RViz visualization
     def init_rviz_visualization(self):
@@ -240,6 +251,37 @@ class ObstacleCourseNode(Node):
         else:
             raise ValueError('visualization_transport must be ros or ssh')
         self._rviz_timer = self.create_timer(0.1, self.publish_rviz_visualization)
+
+    # Global path (from global_planner.py, run with gp.sh)
+    def init_global_path(self):
+        """Publish the frozen goal for the planner and follow its path with a lookahead waypoint."""
+        self.use_global_path = self.declare_parameter('use_global_path', True).value
+        self.path_follower = PathFollower(
+            lookahead=self.declare_parameter('path_lookahead', 0.8).value,
+            timeout=self.declare_parameter('path_timeout', 3.0).value)
+        latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.goal_publisher = self.create_publisher(PointStamped, 'global_goal', latched)
+        self.sub_path = self.create_subscription(Path, 'global_path', self.path_callback, 10)
+        if self._goal.goal_node is not None:
+            self.publish_global_goal()
+
+    def publish_global_goal(self):
+        msg = PointStamped()
+        msg.header.frame_id = self._rviz_frame
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.point.x, msg.point.y = float(self._goal.goal_node[0]), float(self._goal.goal_node[1])
+        self.goal_publisher.publish(msg)
+
+    def path_callback(self, msg:Path):
+        points = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        self.path_follower.set_path(points, time.monotonic())
+
+    def dwa_goal(self):
+        """Goal handed to DWA: a waypoint on a fresh global path, otherwise the final goal."""
+        if not (self.single_point_goal and self.use_global_path):
+            return self._goal.goal_node
+        return self.path_follower.select_goal(self.pose[:2], self._goal.goal_node, time.monotonic())
 
     def _rviz_marker(self, name, marker_type, points, color, size, stamp, z=0.03):
         """Build one marker in controller coordinates; empty points delete it."""
@@ -292,6 +334,19 @@ class ObstacleCourseNode(Node):
         scene.markers.append(self._rviz_marker(
             'reference_goal', Marker.LINE_LIST, goal,
             (0.0, 0.2, 1.0), 0.035, stamp))
+
+        # Global path (magenta) and the waypoint DWA is steering to (orange), only while they are used.
+        following = (self.use_global_path and self.single_point_goal
+                     and self.path_follower.has_fresh_path(time.monotonic()))
+        scene.markers.append(self._rviz_marker(
+            'global_path', Marker.LINE_STRIP,
+            self.path_follower.path if following and len(self.path_follower.path) >= 2 else [],
+            (0.9, 0.0, 0.9), 0.02, stamp, z=0.02))
+        waypoint = self.path_follower.waypoint
+        scene.markers.append(self._rviz_marker(
+            'path_waypoint', Marker.SPHERE_LIST,
+            [waypoint] if following and waypoint is not None else [],
+            (1.0, 0.5, 0.0), 0.09, stamp, z=0.08))
 
         config = self.dwa_config
         if config.robot_type == dynamic_window_approach.RobotType.rectangle:
@@ -368,9 +423,7 @@ class ObstacleCourseNode(Node):
 
     def yaw_from_quaternion(self, q):
         '''Returns yaw angle (in rad) for orientation based on given quaternion input q'''
-        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-        return np.arctan2(siny_cosp, cosy_cosp)
+        return yaw_from_quaternion(q)
 
     def optitrack_callback(self, msg:PoseStamped):
         '''Callback to calculate 2D pose info from Optitrack node. Pose info includes x and y coordinates, as well as heading in degrees.
@@ -419,6 +472,7 @@ class ObstacleCourseNode(Node):
         angle = forward_yaw + math.radians(self.point_goal_left_angle_deg)
         offset = self.point_goal_distance * np.array([math.cos(angle), math.sin(angle)])
         self._goal.goal_node = self.pose[:2] + offset
+        self.publish_global_goal()
         self.get_logger().info(
             f'Fixed point goal: {self._goal.goal_node}, '
             f'{self.point_goal_distance} m at {self.point_goal_left_angle_deg} deg left '
@@ -600,7 +654,7 @@ class ObstacleCourseNode(Node):
             u, predicted_trajectory = dynamic_window_approach.dwa_control(
                 self,
                 x=self._state,
-                goal=self._goal.goal_node,
+                goal=self.dwa_goal(),
                 goal_heading=None if self.single_point_goal else self._goal.goal_heading,
                 ob=self._ob,
                 config=self.dwa_config,
