@@ -2,23 +2,24 @@ import argparse
 import configparser
 import math
 import os
-import time
+from collections import deque
+from time import monotonic
+
 import numpy as np
 import rclpy
-from typing import List, Tuple
-from rb2301_fp import dynamic_window_approach
 
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy, QoSProfile, qos_profile_sensor_data
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import Point, PoseStamped, Twist
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 
-np.set_printoptions(2, suppress=True, threshold=np.inf) # Print numpy arrays to specified d.p., suppress scientific notation and do not truncate
+from rb2301_fp.lidar_route import lidar_reference
+from rb2301_fp.time_elastic_band import LIDAR_X_OFFSET, TebplanSolver
+
 set_logger_level("obstaclecourse", level=LoggingSeverity.INFO) # Configure to either LoggingSeverity.INFO or LoggingSeverity.DEBUG
 
 _PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -71,35 +72,7 @@ class LidarNode(Node):
             self.is_simulation = True
         else:
             self.is_simulation = False
-class Wall():
-    def __init__(self,para,center=None,edge = None):
-        self.para=para#para = (A,B,C)
-        self.center=center
-        self.edge = edge#edge = [(first_dot),(last_dot)]
 
-class Goal():
-    def __init__(self,goal_heading=None,goal_node=None):
-        self._goal_heading = goal_heading
-        self._goal_node = goal_node
-
-    @property
-    def goal_heading(self):
-        return self._goal_heading
-    
-    @goal_heading.setter
-    def goal_heading(self, value):
-        self._goal_heading = value
-        self._goal_node = None
-
-    @property
-    def goal_node(self):
-        return self._goal_node
-    
-    @goal_node.setter
-    def goal_node(self, value):
-        self._goal_node = value
-        self._goal_heading = None
-#============================================node==================================================================================
 class ObstacleCourseNode(Node):
     '''Node to navigate obstacle course, using pose from either gazebo odometer or optitrack and lidar scan data'''
     def __init__(self, is_simulation:bool=True, calibrate:bool=False, *, parameter_overrides=None):
@@ -107,84 +80,44 @@ class ObstacleCourseNode(Node):
         self.get_logger().info("Starting ObstacleCourseNode")
 
         self.is_simulation = is_simulation
-        self.dwa_config = dynamic_window_approach.Config(is_simulation=self.is_simulation)
+
         self.calibrate = calibrate # Real robot: only print poses, never drive
         self.raw_pose = None # Pose exactly as Optitrack reported it (real robot only)
         self.frame = self.course = None
         self._ticks = 0
 
-        self.actual_velocity = None
-        self.last_timestamp = None
+        self.pose = None
+        self._ob = np.empty((0, 2))
+        self._scan_received_at = None
+        self._odom_history = deque(maxlen=32)
+        self._pending_sim_scan = None
+        self._goal_position = None
+        self._teb_detour = None
+        self._teb_candidate_index = 0
+        self._point_goal_reached = False
+        self._course_yaw = 0.0 if is_simulation else -math.pi / 2
 
-        #DWA
-        self._state = np.array([0.0, 0.0, 0.0 , 0.0, 0.0])  #state representation:
-        #                      [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
-        self._goal = Goal()
-
-
-        # Temporary single-goal mode; disable the parameter to restore course stages.
-        self.single_point_goal = self.declare_parameter('single_point_goal', True).value
         self.point_goal_distance = self.declare_parameter('point_goal_distance', 8.0).value
         self.point_goal_left_angle_deg = self.declare_parameter(
             'point_goal_left_angle_deg', -35.0).value
-
-
-        
         if (not math.isfinite(self.point_goal_distance) or self.point_goal_distance <= 0
                 or not math.isfinite(self.point_goal_left_angle_deg)):
             raise ValueError('point_goal_distance must be positive and goal settings must be finite')
-        self._point_goal_reached = False
 
-        if self.is_simulation == False:
-            self._sub_goal = ['-y','-x','+y']# sub_goal_heading, in reverse order
-            self._sub_goal_2 = ['-y']
-        else:
-            self._sub_goal = ['+x','-y','+x']
-            self._sub_goal_2 = ['+x']
-        self._initial_goal_heading = self._sub_goal[-1]
-        if not self.single_point_goal:
-            self._goal.goal_heading = self._initial_goal_heading
-        self._start_stage_started = False
-        self._gate_stage_started = False
-        self._final_stage_started = False
-
-        self._trajectory = np.array(self._state)
-        self._ob = np.array([]) #obstacle array
-        self._is_dwa_initialized = False
-
-
-        #======Deadend checker and goal switch params======#
-        self.density_threshold = 0.25#the obstacle dot density threshhold for detecting deadend
-        self.check_list_threshold = 15 # how many dot needed to start determine if it is a wall
-        self.outlier_dot_threshold = 0.2 # The distance from the point with the outlier dot to the fitted line
-        self.outlier_offset_threshold = 1
-        self.tilt_threshold = 60 # in angular
-        self.close_threshold = 1# how close to a deadend triggers transformation to the next _sub_goal
-        self.deadend_confirm_checks = 3 # consecutive checks of the same wall
-        self.deadend_wall_tolerance = 0.15 # fitted wall offset tolerance, metres
-        self._deadend_candidate = None
-        self._deadend_hits = 0
-        self.curve_threshold = 85# beyond the angle will not be seen as a single wall
-        self.sub_goal_cd =3.0# sub_goal switch cooldown,in seconds
-        self.timestamp = 0.0#
-        self._segmentation = []
-        self.deadend_check_gap = 10# how many times the timercallback run required for deadend check once
-        self.timer_callback_counter = 1
-        self.farthest_dot = None
-        self.wall_list = []
-        self.gate_mse_threshold = 0.1
-        self.min_gate_width_threshold=0.6
-        self.max_gate_width_threshold=0.8
-        self.stage = 'point_goal' if self.single_point_goal else 'start'
-        
-        if is_simulation:
-            self.max_translate_velocity = 0.5
-        else:
-            self.max_translate_velocity = 0.3 # Please keep this in place; 0.3m/s is more than fast enough
+        self.max_translate_velocity = 0.5 if is_simulation else 0.3
+        self.max_angular_velocity = 2 * self.max_translate_velocity
+        self._teb_solver = TebplanSolver(
+            x0=np.zeros(3), xf=np.zeros(3), n=9,
+            v_max=self.max_translate_velocity, omega_max=self.max_angular_velocity,
+            T_max=0.6, w_kin=50.0,
+        )
+        self.footprint = self._teb_solver.footprint
+        self.control_period = 0.05
+        self.scan_timeout = 0.5
 
         self.sub_scan = self.create_subscription(LaserScan, "scan", self.sub_scan_callback, qos_profile_sensor_data) # Subscribe to LiDAR scan data
 
-        # Subscribe to the dynamic_pose topic from Gazebo that publishes ground-truth pose data
+        # The simulator publishes ground-truth pose through odometry.
         if self.is_simulation:
             self.subscription = self.create_subscription(Odometry, 'odom', self.odometer_callback, qos_profile_sensor_data)
         else:
@@ -203,12 +136,9 @@ class ObstacleCourseNode(Node):
                 )
 
         self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10) # Publish to cmd_vel node
-        self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
-
-        self.pose = None
+        self.timer = self.create_timer(self.control_period, self.timer_callback)
         self.init_rviz_visualization()
-#==============================================================================================================
-    # RViz visualization
+
     def init_rviz_visualization(self):
         """Choose direct ROS visualization or JSON snapshots for SSH viewing."""
         self._rviz_predicted_trajectory = None
@@ -252,7 +182,7 @@ class ObstacleCourseNode(Node):
         return marker
 
     def publish_rviz_visualization(self):
-        """RViz equivalent of DWA animate(), plus the active sub-goal heading.
+        """Show the TEB trajectory, robot, scan points and fixed goal.
 
         All data use self.pose's coordinates (Gazebo odom or Optitrack maze).
         The standalone fp_visualization frame needs no TF when used as RViz's
@@ -266,9 +196,6 @@ class ObstacleCourseNode(Node):
         scene = MarkerArray()
 
         predicted = self._rviz_predicted_trajectory
-        if (self.calibrate or (not self.single_point_goal and not self._sub_goal) or self._ob.size == 0
-                or (predicted is not None and len(predicted) < 2)):
-            predicted = None
         scene.markers.append(self._rviz_marker(
             'predicted_trajectory', Marker.LINE_STRIP,
             [] if predicted is None else predicted[:, :2],
@@ -281,20 +208,15 @@ class ObstacleCourseNode(Node):
             (0.1, 0.1, 0.1), 0.035, stamp))
 
         # Blue cross marks the active point goal.
-        goal = [] if self._goal.goal_node is None else np.asarray(self._goal.goal_node) + np.array(
+        goal = [] if self._goal_position is None else self._goal_position + np.array(
             [[-0.1, -0.1], [0.1, 0.1], [-0.1, 0.1], [0.1, -0.1]])
         scene.markers.append(self._rviz_marker(
             'reference_goal', Marker.LINE_LIST, goal,
             (0.0, 0.2, 1.0), 0.035, stamp))
 
-        config = self.dwa_config
-        if config.robot_type == dynamic_window_approach.RobotType.rectangle:
-            outline = np.array([[-1, 1], [1, 1], [1, -1], [-1, -1], [-1, 1]])
-            outline = outline * [config.robot_length / 2, config.robot_width / 2]
-        else:
-            angles = np.linspace(0.0, 2 * math.pi, 49)
-            outline = config.robot_radius * np.column_stack(
-                (np.cos(angles), np.sin(angles)))
+        xmin, xmax, ymin, ymax = self.footprint.base_bounds
+        outline = np.array([[xmin, ymax], [xmax, ymax], [xmax, ymin],
+                            [xmin, ymin], [xmin, ymax]])
         rotation = np.array([[math.cos(yaw), -math.sin(yaw)],
                              [math.sin(yaw), math.cos(yaw)]])
         scene.markers.append(self._rviz_marker(
@@ -306,27 +228,6 @@ class ObstacleCourseNode(Node):
         arrow.scale.y, arrow.scale.z = 0.08, 0.12
         scene.markers.append(arrow)
 
-        direction = {'+x': (1, 0), '-x': (-1, 0), '+y': (0, 1), '-y': (0, -1)}
-        sub_goal = []
-        if self._goal.goal_heading:
-            sub_goal = [position, position + 0.8 * np.array(direction[self._goal.goal_heading])]
-        arrow = self._rviz_marker('sub_goal_heading', Marker.ARROW, sub_goal,
-                                  (0.0, 0.65, 0.9), 0.035, stamp, z=0.12)
-        arrow.scale.y, arrow.scale.z = 0.09, 0.12
-        scene.markers.append(arrow)
-
-        # One POINTS marker with per-point colors avoids stale segment IDs.
-        palette = [(1.0, 0.4, 0.0), (0.6, 0.0, 0.8), (0.0, 0.65, 0.65),
-                   (0.8, 0.55, 0.0), (0.9, 0.0, 0.5), (0.3, 0.4, 1.0)]
-        points, colors = [], []
-        for i, segment in enumerate(self._segmentation):
-            points.extend(segment)
-            r, g, b = palette[i % len(palette)]
-            colors.extend([ColorRGBA(r=r, g=g, b=b, a=1.0) for _ in segment])
-        segments = self._rviz_marker('segmentation', Marker.POINTS, points,
-                                     (1.0, 1.0, 1.0), 0.065, stamp, z=0.05)
-        segments.colors = colors
-        scene.markers.append(segments)
         if self._rviz_server is not None:
             try:
                 self._rviz_server.publish(scene)
@@ -341,28 +242,62 @@ class ObstacleCourseNode(Node):
         return super().destroy_node()
 
 
-#========Utilities=======#
+    @staticmethod
+    def _stamp_ns(msg):
+        stamp = msg.header.stamp
+        return stamp.sec * 1_000_000_000 + stamp.nanosec
+
     def sub_scan_callback(self, msg):
-        """Scan subscriber"""
-        if len(msg.ranges) <= 720:#was 360,choose whether want downsampling
-            self.last_scan = np.array(msg.ranges)
+        received_at = monotonic()
+        if self.is_simulation:
+            self._pending_sim_scan = (self._stamp_ns(msg), received_at, msg)
+            self._project_pending_sim_scan()
         else:
-            self.last_scan = np.array(msg.ranges)[::2]
+            self._project_scan(msg, self.pose, received_at)
 
-        self.update_ob(msg)
-
-    def update_ob(self,msg):
-        if self.pose is None:
+    def _project_pending_sim_scan(self):
+        if self._pending_sim_scan is None or not self._odom_history:
             return
-        r = self.last_scan
-        step = 2 if len(msg.ranges) > 720 else 1
-        yaw = np.deg2rad(self.pose[2])
-        # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
-        a = msg.angle_min + np.arange(r.size) * msg.angle_increment * step + 3.1416 + yaw
-        valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
-        x = self.pose[0] + 0.11423 * np.cos(yaw)
-        y = self.pose[1] + 0.11423 * np.sin(yaw)
-        self._ob = np.column_stack((x + r[valid] * np.cos(a[valid]), y + r[valid] * np.sin(a[valid])))
+        scan_stamp, received_at, msg = self._pending_sim_scan
+        if monotonic() - received_at > self.scan_timeout:
+            self._pending_sim_scan = None
+            return
+        if scan_stamp > self._odom_history[-1][0]:
+            return  # The scan arrived first; wait for odometry to bracket it.
+
+        self._pending_sim_scan = None
+        previous = None
+        for stamp, pose in self._odom_history:
+            if stamp == scan_stamp:
+                self._project_scan(msg, pose, received_at)
+                return
+            if stamp > scan_stamp:
+                if previous is not None:
+                    previous_stamp, previous_pose = previous
+                    gap = stamp - previous_stamp
+                    # Gazebo odometry is configured at 50 Hz. Drop scans across long gaps.
+                    if gap <= 100_000_000:
+                        fraction = (scan_stamp - previous_stamp) / gap
+                        delta = pose - previous_pose
+                        delta[2] = wrap_deg(delta[2])
+                        self._project_scan(msg, previous_pose + fraction * delta, received_at)
+                return
+            previous = stamp, pose
+
+    def _project_scan(self, msg, pose, received_at):
+        if pose is None or not np.isfinite(pose).all() or len(msg.ranges) == 0:
+            self._scan_received_at = None
+            return
+        ranges = np.asarray(msg.ranges)
+        valid = np.isfinite(ranges) & (ranges >= msg.range_min) & (ranges <= msg.range_max)
+        yaw = math.radians(pose[2])
+        # LiDAR mounting from nanocar_description.urdf.
+        angles = msg.angle_min + np.flatnonzero(valid) * msg.angle_increment + 3.1416 + yaw
+        origin = pose[:2] + LIDAR_X_OFFSET * np.array([math.cos(yaw), math.sin(yaw)])
+        self._ob = origin + ranges[valid, None] * np.column_stack(
+            (np.cos(angles), np.sin(angles)))
+        # +inf is a valid no-return reading. An entirely invalid scan cannot guide motion.
+        self._scan_received_at = received_at if np.any(valid | (ranges > msg.range_max)) else None
 
     def yaw_from_quaternion(self, q):
         '''Returns yaw angle (in rad) for orientation based on given quaternion input q'''
@@ -379,7 +314,6 @@ class ObstacleCourseNode(Node):
         x, y, heading = optitrack_to_maze(x, y, heading, self.frame) # CA2 maze frame, see optitrack_variables.config
         self.pose = np.array((x,y,heading))
         self._initialize_point_goal()
-        self.update_actual_velocity(msg.header.stamp)
         return self.pose
 
     def to_course(self, pose=None):
@@ -394,471 +328,209 @@ class ObstacleCourseNode(Node):
         heading = np.rad2deg(self.yaw_from_quaternion(latest_pose_msg.orientation))
         self.pose = np.array((latest_pose_msg.position.x, latest_pose_msg.position.y, heading))
         self._initialize_point_goal()
-        self.update_actual_velocity(msg.header.stamp)
+        stamp = self._stamp_ns(msg)
+        if self._odom_history and stamp < self._odom_history[-1][0]:
+            # A Gazebo clock reset invalidates observations from the old timeline.
+            self._odom_history.clear()
+            self._pending_sim_scan = None
+            self._scan_received_at = None
+            self._ob = np.empty((0, 2))
+        if self._odom_history and stamp == self._odom_history[-1][0]:
+            self._odom_history.pop()
+        self._odom_history.append((stamp, self.pose))
+        self._project_pending_sim_scan()
         return self.pose
 
-    def move_2D(self, x:float=0.0, y:float=0.0, turn:float=0.0):
-        '''Publishes a Twist message to ROS to move a robot. Inputs are x and y linear velocities, as well as turn (z-axis yaw) angular velocity.'''
-        twist_msg = Twist()
-        x = np.clip(x, -self.max_translate_velocity, self.max_translate_velocity)
-        y = np.clip(y, -self.max_translate_velocity, self.max_translate_velocity)
-        turn = np.clip(turn, -self.max_translate_velocity*2, self.max_translate_velocity*2)
-        twist_msg.linear.x, twist_msg.linear.y, twist_msg.linear.z = float(x), float(y), 0.0
-        twist_msg.angular.x, twist_msg.angular.y, twist_msg.angular.z = 0.0, 0.0, float(turn)
-        self.publisher_.publish(twist_msg)
+    def move_2D(self, x: float = 0.0, y: float = 0.0, turn: float = 0.0):
+        twist = Twist()
+        twist.linear.x = float(np.clip(x, -self.max_translate_velocity, self.max_translate_velocity))
+        twist.linear.y = float(np.clip(y, -self.max_translate_velocity, self.max_translate_velocity))
+        twist.angular.z = float(np.clip(turn, -self.max_angular_velocity, self.max_angular_velocity))
+        self.publisher_.publish(twist)
 
     def _initialize_point_goal(self):
-        """Freeze one target relative to the first pose and initial course direction."""
-        if (not self.single_point_goal or self._goal.goal_node is not None
-                or self.pose is None or not np.isfinite(self.pose).all()):
+        """Freeze one target relative to the first valid pose and course direction."""
+        if self._goal_position is not None or not np.isfinite(self.pose).all():
             return
-        forward_yaw = {'+x': 0.0, '-x': math.pi,
-                       '+y': math.pi / 2, '-y': -math.pi / 2}[self._initial_goal_heading]
-        angle = forward_yaw + math.radians(self.point_goal_left_angle_deg)
+        angle = self._course_yaw + math.radians(self.point_goal_left_angle_deg)
         offset = self.point_goal_distance * np.array([math.cos(angle), math.sin(angle)])
-        self._goal.goal_node = self.pose[:2] + offset
-        self.get_logger().info(
-            f'Fixed point goal: {self._goal.goal_node}, '
-            f'{self.point_goal_distance} m at {self.point_goal_left_angle_deg} deg left '
-            f'of initial {self._initial_goal_heading}; course switching disabled')
+        self._goal_position = self.pose[:2] + offset
+        self.get_logger().info(f'Fixed point goal: {self._goal_position}')
 
-    def is_goal_reached(self,threshold = 0.3)->bool:
-        if self._goal.goal_node is None:
-            return False
-        dist_to_goal = math.hypot(self._state[0] - self._goal.goal_node[0], self._state[1] - self._goal.goal_node[1])
-        if dist_to_goal <= threshold:
-            print("Goal!!")
-            return True
+    def _teb_obstacles(self, start, target):
+        """Downsample nearby points for the soft TEB objective."""
+        cell_size = 0.12
+        reach = max(0.5, self.footprint.radius)
+        lower = np.minimum(start, target) - reach
+        upper = np.maximum(start, target) + reach
+        nearby = self._ob[np.all((self._ob >= lower) & (self._ob <= upper), axis=1)]
+        _, representatives = np.unique(np.floor(nearby / cell_size), axis=0, return_index=True)
+        return nearby[representatives]
+
+    def _first_teb_command(self, trajectory, time_steps):
+        """Convert the first optimized segment to forward and yaw velocities."""
+        if (trajectory.ndim != 2 or trajectory.shape[1] != 3 or len(trajectory) < 2
+                or time_steps.shape != (len(trajectory) - 1,)
+                or not np.isfinite(trajectory).all() or not np.isfinite(time_steps).all()
+                or np.any(time_steps <= 0)):
+            raise ValueError('TEB returned an invalid trajectory or time sequence')
+
+        dx, dy, yaw_change = trajectory[1] - trajectory[0]
+        yaw_change = math.atan2(math.sin(yaw_change), math.cos(yaw_change))
+        heading = trajectory[0, 2] + yaw_change / 2
+        speed = (dx * math.cos(heading) + dy * math.sin(heading)) / time_steps[0]
+        turn = yaw_change / time_steps[0]
+        speed = float(np.clip(speed, -self.max_translate_velocity, self.max_translate_velocity))
+        turn = float(np.clip(turn, -self.max_angular_velocity, self.max_angular_velocity))
+
+        duration = max(time_steps[0], self.control_period)
+        # Try a slower command before discarding an otherwise usable band.
+        for scale in (1.0, 0.5, 0.25):
+            candidate_speed, candidate_turn = speed * scale, turn * scale
+            if not self._footprint_blocked(trajectory[0], candidate_speed, candidate_turn, duration):
+                return candidate_speed, candidate_turn
+        raise ValueError('TEB command intersects the LiDAR footprint clearance')
+
+    def _footprint_blocked(self, pose, speed=0.0, turn=0.0, duration=0.0):
+        """Check the moving rectangular footprint against the raw LiDAR points."""
+        times = np.linspace(0, duration, 9)
+        half_turns = turn * times / 2
+        directions = pose[2] + half_turns
+        distances = speed * times * np.sinc(half_turns / math.pi)
+        centers = pose[:2] + distances[:, None] * np.column_stack(
+            (np.cos(directions), np.sin(directions)))
+        headings = pose[2] + 2 * half_turns
+        # Bound how far any corner can move between the samples.
+        padding = (abs(speed) + self.footprint.radius * abs(turn)) * (times[1] - times[0]) / 2
+        return self._footprints_hit_scan(centers, headings, padding)
+
+    def _footprints_hit_scan(self, centers, headings, padding):
+        cos_yaw, sin_yaw = np.cos(headings)[:, None], np.sin(headings)[:, None]
+        dx = self._ob[None, :, 0] - centers[:, None, 0]
+        dy = self._ob[None, :, 1] - centers[:, None, 1]
+        local_x = dx * cos_yaw + dy * sin_yaw
+        local_y = -dx * sin_yaw + dy * cos_yaw
+        xmin, xmax, ymin, ymax = self.footprint.base_bounds
+        return np.any((local_x >= xmin - padding) & (local_x <= xmax + padding)
+                      & (local_y >= ymin - padding) & (local_y <= ymax + padding))
+
+    def _band_blocked(self, trajectory):
+        """Check the swept footprint along every displayed trajectory segment."""
+        for start, end in zip(trajectory[:-1], trajectory[1:]):
+            delta = end - start
+            delta[2] = math.atan2(math.sin(delta[2]), math.cos(delta[2]))
+            corner_travel = np.linalg.norm(delta[:2]) + self.footprint.radius * abs(delta[2])
+            intervals = max(1, math.ceil(corner_travel / 0.02))
+            poses = start + np.linspace(0, 1, intervals + 1)[:, None] * delta
+            if self._footprints_hit_scan(poses[:, :2], poses[:, 2], corner_travel / (2 * intervals)):
+                return True
         return False
 
-    def update_state(self)->np.ndarray:
-        """update speed and orientation using pose[], keep vel and omega"""
-        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self.actual_velocity[0], self.actual_velocity[1] ])
+    def _plan_teb_command(self, start, offset, distance, scan_received_at):
+        if self._footprint_blocked(start):
+            raise ValueError('LiDAR point inside the current robot footprint')
 
-    def update_actual_velocity(self, stamp):
-        """use differentiation of position to estimate the forward speed(m/s) and angular speed(rad/s)"""
-        timestamp = stamp.sec + stamp.nanosec * 1e-9
-        if self.last_timestamp is not None:
-            dt = timestamp - self.last_timestamp
-            if dt == 0:
-                return  
-            if dt < 0:
-                self.actual_velocity = None
-                self.filtered_forward_velocity = None
-            else:
-                dx, dy = self.pose[:2] - self.last_pose[:2]
-                yaw = math.radians(self.pose[2])
-                previous_yaw = math.radians(self.last_pose[2])
-                delta_yaw = math.atan2(math.sin(yaw - previous_yaw),
-                                       math.cos(yaw - previous_yaw))
-                midpoint_yaw = previous_yaw + delta_yaw / 2
-                v = (dx * math.cos(midpoint_yaw) + dy * math.sin(midpoint_yaw)) / dt
-                self.actual_velocity = (v, delta_yaw / dt)
-        self.last_pose = self.pose.copy()
-        self.last_timestamp = timestamp
+        target_yaw = math.atan2(offset[1], offset[0])
+        segments = self._teb_solver.n + 1
+        candidates = []
+        direct = np.array([*(start[:2] + offset * (min(distance, 0.8) / distance)), target_yaw])
+        if self._band_blocked(np.array([start, direct])):
+            reference = lidar_reference(
+                start, start[:2] + offset, self._ob, self.footprint.radius, segments)
+            if reference is not None and not self._band_blocked(reference):
+                candidates.append((reference[-1], False, reference))
+        # Keep following a selected detour until close enough to resume toward the main goal.
+        if self._teb_detour is not None and np.linalg.norm(self._teb_detour[:2] - start[:2]) > 0.18:
+            candidates.append((self._teb_detour, True, None))
+        for angle_deg, reach in (
+            (0, 0.8), (75, 0.55), (-75, 0.55),
+            (0, 0.45), (30, 0.45), (-30, 0.45), (55, 0.45), (-55, 0.45),
+            (0, 0.30), (30, 0.30), (-30, 0.30), (75, 0.30), (-75, 0.30),
+        ):
+            yaw = target_yaw + math.radians(angle_deg)
+            target = start[:2] + min(distance, reach) * np.array([math.cos(yaw), math.sin(yaw)])
+            candidates.append((np.array([*target, yaw]), angle_deg != 0, None))
 
-    def set_dwa_param(self,to_goal_heading=None, to_goal_node=None,speed=0.5, ob=0.01, pre_time=1.5, v_res=0.01):  #Update DWA param online
-        self.dwa_config.speed_cost_gain = speed
-        self.dwa_config.obstacle_cost_gain = ob
-        self.dwa_config.to_goal_heading_cost_gain = to_goal_heading
-        self.dwa_config.to_goal_cost_gain = to_goal_node
-        self.dwa_config.predict_time = pre_time
-        self.dwa_config.v_resolution = v_res
-#=====================================stage_para_initialization==========================================
-    def start_stage(self):
-        if self._start_stage_started:
+        clear = [candidate for candidate in candidates if not self._footprint_blocked(candidate[0])]
+        if not clear:
+            self._teb_detour = None
+            self._teb_candidate_index = 0
+            x, y, yaw = start
+            raise ValueError(
+                f'all {len(candidates)} local TEB goals overlap LiDAR points '
+                f'at pose ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f} deg)'
+            )
+
+        index = self._teb_candidate_index % len(clear)
+        deadline = scan_received_at + self.scan_timeout
+        error = 'scan too old for another TEB solve'
+        for _ in range(min(2, len(clear))):
+            # Leave time for one solve and return to the executor so scans can be processed.
+            if deadline - monotonic() < 0.18:
+                break
+            goal, is_detour, reference = clear[index]
+            try:
+                trajectory, time_steps = self._teb_solver.solve(
+                    x0=start, xf=goal, obstacles=self._teb_obstacles(start[:2], goal[:2]),
+                    reference=reference,
+                )
+                speed, turn = self._first_teb_command(trajectory, time_steps)
+                if self._band_blocked(trajectory):
+                    raise ValueError('TEB trajectory crosses the LiDAR footprint clearance')
+            except (RuntimeError, ValueError) as failure:
+                error = str(failure)
+                index = (index + 1) % len(clear)
+                self._teb_candidate_index = index
+                continue
+            if monotonic() >= deadline:
+                self._teb_candidate_index = (index + 1) % len(clear)
+                raise ValueError('scan expired during the TEB solve')
+            self._teb_detour = goal if is_detour else None
+            self._teb_candidate_index = 0
+            return trajectory, speed, turn
+        raise ValueError(f'no usable local TEB trajectory ({len(clear)} clear goals, {error})')
+
+    def timer_callback(self):
+        if self.calibrate:
+            if self.raw_pose is not None:
+                self._ticks += 1
+                if self._ticks % 10 == 0:
+                    self.get_logger().info(
+                        f'Optitrack pose: {self.raw_pose}; maze pose: {self.pose}')
             return
-        self._start_stage_started = True
-        self.set_dwa_param(to_goal_heading=0.1,speed=1.2,ob=0.1,pre_time=1.5,v_res=0.02)
-        self.get_logger().info('enter start stage!dwa param changed')
 
-    def final_stage(self):
-        if self._final_stage_started:
-            return
-        self._final_stage_started = True
-        self.close_threshold /= 2
-        self.set_dwa_param(to_goal_heading=0.5,speed=1.5,ob=0.5,pre_time=1.5,v_res=0.01)
-        self.get_logger().info('enter final stage!dwa param changed')
-
-    def gate_stage(self):
-        if self._gate_stage_started:
-            return
-        self._gate_stage_started = True
-        self.close_threshold /= 2
-        self.set_dwa_param(to_goal_node=0.5,speed=1,ob=0.2,pre_time=1.5,v_res=0.01)
-        self.get_logger().info('enter gate stage!dwa param changed')
-#===============================timer_callback=====================================================
-    def timer_callback(self):   #timer callback framework for performance evaluation
-        callback_started = time.perf_counter()
-        timings = {'DWA': None, 'deadend_detect': None}
-        try:
-            self._run_timer_callback(timings)
-        finally:
-            callback_ms = (time.perf_counter() - callback_started) * 1000.0
-            phases = ', '.join(
-                f'{name}={elapsed * 1000.0:.3f} ms' if elapsed is not None
-                else f'{name}=skipped'
-                for name, elapsed in timings.items())
-            # self.get_logger().info(
-            #     f'Performance: {phases}, timer_callback={callback_ms:.3f} ms')
-
-    def _run_timer_callback(self, timings): #real timer_callback
-        """Controller loop; deadend timing includes segmentation and wall fitting."""
-        if self.pose is None:
-            print("No pose detected")
-            return # Does not run if no pose received from Odom or Optitrack
-
-        if self.calibrate and self.raw_pose is not None:
-            self._ticks += 1
-            if self._ticks % 10 == 0: # twice a second
-                ox, oy, oh = self.raw_pose
-                #self.get_logger().info(f"optitrack ({ox:+.3f}, {oy:+.3f}, {oh:+7.1f} deg)  ->  maze ({self.pose[0]:+.3f}, {self.pose[1]:+.3f}, {self.pose[2]:+7.1f} deg)")
-            return # Calibration mode: look, don't drive
-
-        self.get_logger().info(f"Pose: {self.pose}")
-
-        self._initialize_point_goal()
-        
-        if self.single_point_goal:
-            if self._goal.goal_node is None:
-                self.move_2D()
-                return
-            if self._point_goal_reached or self.is_goal_reached():
-                self._point_goal_reached = True
-                self.stage = 'done'
-                self._rviz_predicted_trajectory = None
-                self._state[3:] = 0.0
-                self.move_2D()
-                return
-
-        #DWA integration
-        if self.pose is None or self._ob.size == 0 or self.actual_velocity is None:
-            return
-        if not self.single_point_goal and not self._sub_goal:
+        self._rviz_predicted_trajectory = None
+        if self._goal_position is None or not np.isfinite(self.pose).all():
             self.move_2D()
             return
-        
-        self._state = self.update_state()   #Update the state
 
-        if not self.single_point_goal and self.stage == 'start':
-            self.start_stage()
-            if self.timer_callback_counter % self.deadend_check_gap == 0:
-                self.timer_callback_counter = 1
-                deadend_started = time.perf_counter()
-                try:
-                    self._segmentation = []
-                    self.segment_chipper()#genrate _segmentation
-                    self.wall_list=[]
-                    self.wall_generator()
-                    #Detect deadend_wall and change subgoal
-                    deadend_wall = self.deadend_detector()
-                finally:
-                    timings['deadend_detect'] = time.perf_counter() - deadend_started
+        offset = self._goal_position - self.pose[:2]
+        distance = np.linalg.norm(offset)
+        if self._point_goal_reached or distance <= 0.3:
+            if not self._point_goal_reached:
+                self.get_logger().info('Point goal reached')
+            self._point_goal_reached = True
+            self.move_2D()
+            return
 
-                # Only the final sub-goal searches for the exit gate.
-                gate = self.gate_detector("+x")
-                if gate is not None:
-                    self._goal.goal_node = gate
-                    self.stage = 'gate'
+        scan_received_at = self._scan_received_at
+        if scan_received_at is None or monotonic() - scan_received_at > self.scan_timeout:
+            self.move_2D()
+            return
 
-                else:
-                    if self.confirm_deadend(deadend_wall):
-                        self._sub_goal.pop()
-                        self.timestamp = time.monotonic()
-                        if not self._sub_goal:
-                            self._goal.goal_heading = self._sub_goal_2[-1]
-
-                        self._goal.goal_heading = self._sub_goal[-1]
-                        self.get_logger().info(
-                            f'switch to the next _sub_goal!{self._sub_goal[-1]}'
-                        )
-
-            else:
-                self.timer_callback_counter+=1
-
-
-        if not self.single_point_goal and self.stage == 'gate':
-            self.gate_stage()
-            if self.is_goal_reached():
-                self._goal.goal_node = None
-                self.get_logger().info('gate reached')
-                self.stage = 'final'
-
-
-        if not self.single_point_goal and self.stage == 'final':
-            self._goal.goal_heading = self._sub_goal_2[-1]
-            self.final_stage()
-
-
-
-#===========================DWA======================================================================
-        self._trajectory = np.vstack((self._trajectory, self._state))
-        dwa_started = time.perf_counter()
+        start = np.array([*self.pose[:2], math.radians(self.pose[2])])
         try:
-            u, predicted_trajectory = dynamic_window_approach.dwa_control(
-                self,
-                x=self._state,
-                goal=self._goal.goal_node,
-                goal_heading=None if self.single_point_goal else self._goal.goal_heading,
-                ob=self._ob,
-                config=self.dwa_config,
-            )
-        finally:
-            timings['DWA'] = time.perf_counter() - dwa_started
-        self._rviz_predicted_trajectory = predicted_trajectory
-        self.move_2D(u[0],0.0,u[1])
-        #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
+            trajectory, speed, turn = self._plan_teb_command(start, offset, distance, scan_received_at)
+        except (RuntimeError, ValueError) as error:
+            self.move_2D()
+            self.get_logger().warning(f'TEB stopped: {error}', throttle_duration_sec=1.0)
+            return
+        if monotonic() - scan_received_at > self.scan_timeout:
+            self.move_2D()
+            return
+        self._rviz_predicted_trajectory = trajectory
+        self.move_2D(speed, turn=turn)
 
-
-#===========================MATH=====================================================================
-    @staticmethod
-    def measure_distance_dot_and_line(dot,line):
-        A = line[0]
-        B = line[1]
-        C = line[2]
-        _dot = np.asarray(dot)[:2]
-        norm = np.hypot(A, B)
-        if norm == 0:
-            raise ValueError('A and B cannot both be zero')
-        return float(np.abs(_dot @ np.array([A, B]) + C) / norm)
-
-    @staticmethod
-    def measure_angle(vector_1,vector_2):
-            norm_product = np.linalg.norm(vector_1) * np.linalg.norm(vector_2)
-            cos_theta = np.dot(vector_1, vector_2) / norm_product
-            angle_deg = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
-            return angle_deg
-    
-#
-    def wall_generator(self):
-        for segment in self._segmentation:
-            if len(segment) < self.check_list_threshold:
-                continue
-
-            points = np.asarray(segment, dtype=float)
-            center = points.mean(axis=0)
-            centered = points - center
-
-            _, s, vh = np.linalg.svd(centered, full_matrices=False)
-            # 第一主方向沿着墙，第二主方向垂直于墙
-            # vh[0]点云延伸最明显的方向,vh[1]法线方向
-            #s[0]点云沿第1个方向的分散程度
-            if s[0] < 1e-12:
-                continue
-
-            A, B = vh[1]  # 单位法向量，A²+B²=1
-            C = -np.dot([A, B], center)
-            this_wall = Wall((A,B,C),center=center,edge=((segment[0]),(segment[-1])))
-            self.wall_list.append(this_wall)
-    def confirm_deadend(self, wall):
-        """Require repeated observations of one nearby wall."""
-        distance = (self.measure_distance_dot_and_line(self.pose, wall)
-                    if wall is not None else float('inf'))
-        if (distance > self.close_threshold
-                or time.monotonic() < self.timestamp + self.sub_goal_cd):
-            self._deadend_candidate = None
-            self._deadend_hits = 0
-            return False
-
-        candidate = np.asarray(wall, dtype=float)
-        candidate = candidate / np.linalg.norm(candidate[:2])
-        previous = self._deadend_candidate
-        if previous is not None and np.dot(candidate[:2], previous[:2]) < 0:
-            candidate = -candidate
-        same_wall = (previous is not None
-                     and np.dot(candidate[:2], previous[:2]) >= math.cos(math.radians(self.tilt_threshold))
-                     and abs(candidate[2] - previous[2]) <= self.deadend_wall_tolerance)
-        if same_wall:
-            self._deadend_hits += 1
-        else:
-            self._deadend_candidate = candidate
-            self._deadend_hits = 1
-        if self._deadend_hits < self.deadend_confirm_checks:
-            return False
-        self._deadend_candidate = None
-        self._deadend_hits = 0
-        return True
-
-    def check_segment(self,wall,farthest_dot):# for each segments, detect if it is a deadend wall
-        '''
-        check if it is a deadend
-        '''
-        A,B,C = wall.para
-        center = wall.center
-
-        x_distance = self.measure_distance_dot_and_line(farthest_dot,(A,B,C))
-        y_distance = r = np.hypot(farthest_dot[0]-center[0], farthest_dot[1]-center[1])
-
-        if x_distance > self.outlier_dot_threshold and y_distance < self.outlier_offset_threshold:
-            self.get_logger().warn(f'infeasible wall! its not the farthest one:distance:{x_distance}')
-            return None
-
-        goal_direction = {
-            '+x': (1, 0), '-x': (-1, 0),
-            '+y': (0, 1), '-y': (0, -1),
-        }[self._sub_goal[-1]]
-        normal = np.array([A, B])
-        # Reject a wall behind the robot along the current goal direction.
-        robot_side = normal @ self.pose[:2] + C
-        if robot_side * np.dot(normal, goal_direction) > 0:
-            self.get_logger().warn(f'infeasible wall!it is behind the robot')
-            return None
-
-        vector_1 = np.array([-B, A])  # 沿墙方向，与直线法向量 (A, B) 垂直
-        if self._sub_goal[-1] == '+x' or self._sub_goal[-1]=='-x':
-            vector_2 = np.array([1,0])
-        else:
-            vector_2 = np.array([0,1])
-
-        angle_deg = self.measure_angle(vector_1,vector_2)
-        # A blocking wall is perpendicular to travel; SVD signs are arbitrary.
-        angle = abs(angle_deg-90.0)
-        if angle > self.tilt_threshold:
-            self.get_logger().warn(f'infeasible wall!it is not in good angle{angle}')
-            return None
-
-        # The finite wall must span the robot's forward path, not merely have
-        # an infinite extension in front of it. Require coverage of its width.
-        direction = np.asarray(goal_direction, dtype=float)
-        lateral = np.array([-direction[1], direction[0]])
-        edges = np.asarray(wall.edge) - self.pose[:2]
-        side = edges @ lateral
-        half_width = self.dwa_config.robot_width / 2
-        #if side.min() > -half_width or side.max() < half_width:
-        #    return None
-
-        return (A,B,C)
-    
-    def segment_chipper(self):
-        if self.pose is None or self._ob.size == 0 or not self._sub_goal:
-            return None
-
-        # Find the global extreme before accepting any candidate segment.
-        self.farthest_dot=self.pose[:2]
-        last_dot = None
-        
-        for dot in self._ob:
-            if self._sub_goal[-1] == '+x':# update the farthest dot
-                if dot[0]>self.farthest_dot[0]:
-                    self.farthest_dot = dot
-            elif self._sub_goal[-1] == '-x':
-                if dot[0]<self.farthest_dot[0]:
-                    self.farthest_dot = dot
-            elif self._sub_goal[-1] == '+y':
-                if dot[1]>self.farthest_dot[1]:
-                    self.farthest_dot = dot
-            elif self._sub_goal[-1] == '-y':
-                if dot[1]<self.farthest_dot[1]:
-                    self.farthest_dot = dot
-            else:
-                raise ValueError('_sub_goal should only contain "+x","-x","+y"or"-y"')
-
-        continuous_list=[]
-        aver_hist_vector = None
-        fracture = False
-        cache_segment=[]
-        fractured_flag = False
-        for dot in self._ob:
-            if last_dot is not None:
-                distance = abs(last_dot[0]-dot[0]) + abs(last_dot[1]-dot[1])
-
-                new_vector = np.asarray(last_dot)-np.asarray(dot)
-                if aver_hist_vector is None and last_dot is not None:
-                    aver_hist_vector = np.asarray(last_dot)-np.asarray(dot)
-                if aver_hist_vector is not None:
-                    angle = self.measure_angle(new_vector,aver_hist_vector)
-                    if angle < self.curve_threshold:
-                        aver_hist_vector= aver_hist_vector/5+new_vector*4/5
-                        fracture = False
-                    else:
-                        fracture = True
-                        aver_hist_vector = new_vector
-            if (last_dot is not None and distance > self.density_threshold) or (aver_hist_vector is not None and fracture == True):  #once the continuous list fracture or reaches the end
-                if len(continuous_list) >= self.check_list_threshold:
-                    self._segmentation.append(continuous_list)
-                continuous_list=[dot]
-                fractured_flag = True
-            else:
-                if fractured_flag == False:
-                    cache_segment.append(dot)
-                else:
-                    continuous_list.append(dot)
-            last_dot = dot
-        continuous_list =continuous_list + cache_segment
-        self._segmentation.append(continuous_list)
-
-    def deadend_detector(self):
-        '''
-        for each segment,check if it it a deadend
-        '''
-        for wall in self.wall_list:
-            result = self.check_segment(wall=wall,farthest_dot=self.farthest_dot)
-            if result is not None:
-                return result
-        return None
-    
-    def gate_detector(self,self_goal_heading):
-        candidate_walls = []
-
-        for wall in self.wall_list:
-            A,B,C = wall.para
-            goal_direction = {
-                '+x': (1, 0), '-x': (-1, 0),
-                '+y': (0, 1), '-y': (0, -1),
-            }[self_goal_heading]
-            normal = np.array([A, B])
-            #filter walls that perpendicular to travel or in the other side
-            robot_side = normal @ self.pose[:2] + C
-            if robot_side * np.dot(normal, goal_direction) > 0:
-                continue
-
-            vector_1 = np.array([-B, A])  
-            if self_goal_heading == '+x' or self_goal_heading=='-x':
-                vector_2 = np.array([1,0])
-            else:
-                vector_2 = np.array([0,1])
-            angle_deg = self.measure_angle(vector_1,vector_2)
-            if abs(angle_deg - 90.0) > self.tilt_threshold:
-                continue
-            candidate_walls.append(wall)
-
-        if len(candidate_walls) < 2:
-            self.get_logger().debug(
-                f'Gate detection: segments={len(self._segmentation)}, '
-                f'walls={len(self.wall_list)}, candidates={len(candidate_walls)}, '
-                f'segment_sizes={[len(s) for s in self._segmentation]}'
-            )
-            return None
-        min_mse = float('inf')
-        best_pair = None
-        for i, wall_1 in enumerate(candidate_walls):
-            for wall_2 in candidate_walls[i + 1:]:
-                p1 = np.asarray(wall_1.para)
-                p2 = np.asarray(wall_2.para)
-                # SVD may give opposite normals for the same line.
-                # Keep the squared-error sum to preserve the threshold scale.
-                mse = min(np.sum((p1 - p2)**2), np.sum((p1 + p2)**2))
-                if mse < min_mse:
-                    min_mse = mse
-                    best_pair = (wall_1, wall_2)
-
-        if best_pair is not None and min_mse < self.gate_mse_threshold:
-            wall_1, wall_2 = best_pair
-            gate_width = abs(np.asarray(wall_1.edge[1][1])-np.asarray(wall_2.edge[0][1]))
-            if gate_width < self.min_gate_width_threshold:
-                
-                return None
-            if gate_width > self.max_gate_width_threshold:
-                return None
-            gate_center = (np.asarray(wall_1.edge[1])+np.asarray(wall_2.edge[0]))/2
-            self.get_logger().error(f'detected a gate!{gate_center}')
-            gate_center[0] += 0.15
-            return gate_center
-        self.get_logger().debug(
-            f'Gate detection: candidates={len(candidate_walls)}, '
-            f'min_mse={min_mse:.6f}, threshold={self.gate_mse_threshold}'
-        )
-        return None
 
 def main(args=None):
     arg_parser = argparse.ArgumentParser(description="RB2301 final project")
@@ -874,14 +546,16 @@ def main(args=None):
     is_simulation = lidar.is_simulation
     lidar.destroy_node()
 
-    # Start spinning the obstacle node and only stop once SystemExit error is raised within the node callback
     obstacle = ObstacleCourseNode(is_simulation, cli_args.calibrate)
     try:
         rclpy.spin(obstacle)
-    except SystemExit:
-        print("Shutting down")
-    obstacle.destroy_node()
-    rclpy.shutdown()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        if rclpy.ok() and not obstacle.calibrate:
+            obstacle.move_2D()
+        obstacle.destroy_node()
+        rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()

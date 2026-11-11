@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
     ],
-    install_requires=['setuptools', 'numpy', 'matplotlib'],
+    install_requires=['setuptools', 'numpy', 'matplotlib', 'casadi'],
     zip_safe=True,
     maintainer='marmot',
     maintainer_email='marmot@todo.todo',
