@@ -390,6 +390,27 @@ def benchmark():
                 scene, count, timings[0], timings[1], timings[0] / timings[1]))
 
 
+class DynamicWindowTests(unittest.TestCase):
+    def test_window_stays_valid_when_measured_speed_spikes(self):
+        for is_simulation in (True, False):
+            config = dwa.Config(is_simulation=is_simulation)
+            for v in (-0.5, -0.05, 0.0, 0.1, config.max_speed + 0.03, 1.5):
+                for yaw_rate in (-3.0, 0.0, 3.0):
+                    dw = dwa.calc_dynamic_window(np.array([0., 0., 0., v, yaw_rate]), config)
+                    self.assertLessEqual(dw[0], dw[1])
+                    self.assertLessEqual(dw[2], dw[3])
+                    self.assertGreaterEqual(dw[0], config.min_speed)
+                    self.assertLessEqual(dw[1], config.max_speed)
+                    self.assertGreaterEqual(dw[2], -config.max_yaw_rate)
+                    self.assertLessEqual(dw[3], config.max_yaw_rate)
+
+    def test_negative_measured_speed_never_reverses_on_real_robot(self):
+        config = dwa.Config(is_simulation=False)
+        u, _ = dwa.dwa_control(None, np.array([0., 0., 0., -0.05, 0.]), np.array([[50., 50.]]),
+                               goal=np.array([-5., 0.]), config=config)
+        self.assertGreaterEqual(u[0], 0.0)
+
+
 if __name__ == "__main__":
     if "--benchmark" in sys.argv:
         benchmark()

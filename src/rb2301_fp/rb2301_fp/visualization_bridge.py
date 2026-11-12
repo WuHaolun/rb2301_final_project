@@ -1,10 +1,13 @@
 """One-way JSON snapshots over an SSH-forwarded localhost HTTP connection.
 
-Only the common Marker fields used by this project cross the connection. ROS
-serialization, graph discovery and robot commands never cross this bridge.
+Only the common Marker fields used by this project (controller, port 8765) and
+the global planner's occupancy grids (planner, port 8766) cross the connection.
+ROS serialization, graph discovery and robot commands never cross this bridge.
 The robot-side server uses Python's standard library and is Python 3.8 compatible.
 """
 import argparse
+import array
+import base64
 import gzip
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,13 +22,17 @@ import uuid
 import zlib
 
 import rclpy
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import Point
+from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+MAX_GRID_CELLS = 2000 * 2000
+GRID_TOPICS = ('global_map', 'global_costmap') # the only grids a planner snapshot may carry
 
 
 def encode_marker(marker):
@@ -70,6 +77,42 @@ def decode_scene(snapshot, stamp):
                          for c in entry['colors']]
         scene.markers.append(marker)
     return scene
+
+
+def encode_grid(values, resolution, origin, frame):
+    """int8 [row, col] grid (numpy array) -> JSON-safe dict; cells travel as base64 bytes."""
+    rows, cols = values.shape
+    return dict(frame=frame, resolution=float(resolution), width=int(cols), height=int(rows),
+                origin=[float(origin[0]), float(origin[1])],
+                data=base64.b64encode(values.astype('int8').tobytes()).decode('ascii'))
+
+
+def decode_grids(snapshot, stamp):
+    """Planner snapshot -> {topic: nav_msgs/OccupancyGrid} stamped with the local clock."""
+    if snapshot.get('version') != 1:
+        raise ValueError('Unsupported visualization snapshot version')
+    grids = snapshot['grids']
+    if not isinstance(grids, dict) or not set(grids) <= set(GRID_TOPICS):
+        raise ValueError('Invalid grid names')
+    messages = {}
+    for topic, entry in grids.items():
+        width, height = int(entry['width']), int(entry['height'])
+        if width <= 0 or height <= 0 or width * height > MAX_GRID_CELLS:
+            raise ValueError('Invalid grid size')
+        data = base64.b64decode(entry['data'], validate=True)
+        if len(data) != width * height:
+            raise ValueError('Grid data does not match its size')
+        msg = OccupancyGrid()
+        msg.header.frame_id = entry['frame']
+        msg.header.stamp = stamp
+        msg.info.map_load_time = stamp
+        msg.info.resolution = float(entry['resolution'])
+        msg.info.width, msg.info.height = width, height
+        msg.info.origin.position.x, msg.info.origin.position.y = map(float, entry['origin'])
+        msg.info.origin.orientation.w = 1.0
+        msg.data = array.array('b', data)
+        messages[topic] = msg
+    return messages
 
 
 class VisualizationSnapshotServer:
@@ -120,9 +163,13 @@ class VisualizationSnapshotServer:
         self._thread.start()
 
     def publish(self, scene):
+        self.publish_snapshot(markers=[encode_marker(marker) for marker in scene.markers])
+
+    def publish_snapshot(self, **content):
+        """Replace the cached frame with version/stream/sequence plus content (JSON-safe)."""
         self._sequence += 1
-        snapshot = dict(version=1, stream=self._stream, sequence=self._sequence,
-                        markers=[encode_marker(marker) for marker in scene.markers])
+        snapshot = dict(version=1, stream=self._stream, sequence=self._sequence)
+        snapshot.update(content)
         payload = json.dumps(snapshot, separators=(',', ':'), allow_nan=False).encode('utf-8')
         if len(payload) > MAX_SNAPSHOT_BYTES:
             raise ValueError('Visualization snapshot exceeds 8 MiB')
@@ -136,17 +183,18 @@ class VisualizationSnapshotServer:
             self._thread.join(timeout=1.0)
 
 
-class VisualizationRelay(Node):
-    """Download in one worker; refresh RViz independently of network latency."""
+class _SnapshotRelay(Node):
+    """Download in one worker; ROS callbacks never wait for HTTP.
 
-    def __init__(self, port=8765, timeout=3.0, stale_after=3.0, poll_rate=5.0):
+    Subclasses decode a snapshot (_decode), publish it (_show) and clear it (_hide).
+    """
+    label = 'visualization'
+    warning_period = 5.0 # [s] between "unavailable" warnings
+
+    def __init__(self, name, port, timeout, stale_after, poll_rate):
         if not all(math.isfinite(v) and v > 0 for v in (timeout, stale_after, poll_rate)):
             raise ValueError('timeout, stale_after and poll_rate must be finite and positive')
-        super().__init__('fp_visualization_relay')
-        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
-                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.publisher = self.create_publisher(
-            MarkerArray, '/obstaclecourse/visualization', qos)
+        super().__init__(name)
         self.url = 'http://127.0.0.1:{}/snapshot'.format(port)
         self._port = port
         self._timeout = timeout
@@ -160,10 +208,20 @@ class VisualizationRelay(Node):
         self._last_warning = -math.inf
         self._connected = False
         self._visible = False
+        self._shown = None # frame last passed to _show
         self._worker = threading.Thread(target=self._download_loop, daemon=True)
         self._worker.start()
         self.timer = self.create_timer(0.1, self.poll_snapshot)
-        self.get_logger().info('Waiting for visualization at ' + self.url)
+        self.get_logger().info('Waiting for {} at {}'.format(self.label, self.url))
+
+    def _decode(self, snapshot, stamp):
+        raise NotImplementedError
+
+    def _show(self, data, is_new):
+        raise NotImplementedError
+
+    def _hide(self):
+        raise NotImplementedError
 
     def _download_once(self, connection):
         connection.request('GET', '/snapshot', headers={'Accept-Encoding': 'gzip'})
@@ -181,12 +239,17 @@ class VisualizationRelay(Node):
                 raise ValueError('Visualization snapshot exceeds 8 MiB')
         return json.loads(payload)
 
+    def _error_wait(self):
+        """Extra wait after a failed request (0 = keep the normal poll period)."""
+        return 0.0
+
     def _download_loop(self):
         last_key = None
         connection = None
         try:
             while not self._stop.is_set():
                 started = time.monotonic()
+                wait = self._poll_period
                 try:
                     if connection is None:
                         connection = HTTPConnection('127.0.0.1', self._port, timeout=self._timeout)
@@ -194,9 +257,9 @@ class VisualizationRelay(Node):
                     snapshot = self._download_once(connection)
                     key = (snapshot['stream'], snapshot['sequence'])
                     if key != last_key:
-                        scene = decode_scene(snapshot, Marker().header.stamp)
+                        data = self._decode(snapshot, Marker().header.stamp)
                         with self._lock:
-                            self._frame = (scene, time.monotonic())
+                            self._frame = (data, time.monotonic())
                         last_key = key
                     with self._lock:
                         self._last_error = None
@@ -208,8 +271,9 @@ class VisualizationRelay(Node):
                         connection.close()
                     connection = None
                     self._connection = None
+                    wait = max(wait, self._error_wait())
                 # One request at a time; slow links never accumulate requests.
-                self._stop.wait(max(0.05, self._poll_period - (time.monotonic() - started)))
+                self._stop.wait(max(0.05, wait - (time.monotonic() - started)))
         finally:
             if connection is not None:
                 connection.close()
@@ -220,26 +284,24 @@ class VisualizationRelay(Node):
         with self._lock:
             frame, error = self._frame, self._last_error
         if frame is not None and now - frame[1] < self._stale_after:
-            scene = frame[0]
-            stamp = self.get_clock().now().to_msg()
-            for marker in scene.markers:
-                marker.header.stamp = stamp
-            self.publisher.publish(scene)
+            self._show(frame[0], frame is not self._shown)
+            self._shown = frame
             self._visible = True
             if not self._connected:
-                self.get_logger().info('Receiving visualization snapshots')
+                self.get_logger().info('Receiving {} snapshots'.format(self.label))
             self._connected = True
             return
         if self._visible:
-            self.publisher.publish(MarkerArray(markers=[Marker(action=Marker.DELETEALL)]))
+            self._hide()
             self._visible = False
+        self._shown = None
         self._connected = False
-        if now - self._last_warning >= 5.0:
+        if now - self._last_warning >= self.warning_period:
             reason = 'waiting for the first snapshot' if frame is None else (
                 'no new snapshot for {:.1f}s'.format(now - frame[1]))
             if error:
                 reason += '; ' + error
-            self.get_logger().warning('Visualization unavailable: ' + reason)
+            self.get_logger().warning('{} unavailable: {}'.format(self.label.capitalize(), reason))
             self._last_warning = now
 
     def destroy_node(self):
@@ -254,6 +316,64 @@ class VisualizationRelay(Node):
         return super().destroy_node()
 
 
+class VisualizationRelay(_SnapshotRelay):
+    """Controller markers -> /obstaclecourse/visualization, refreshed at 10 Hz."""
+
+    def __init__(self, port=8765, timeout=3.0, stale_after=3.0, poll_rate=5.0):
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        super().__init__('fp_visualization_relay', port, timeout, stale_after, poll_rate)
+        self.publisher = self.create_publisher(
+            MarkerArray, '/obstaclecourse/visualization', qos)
+
+    def _decode(self, snapshot, stamp):
+        return decode_scene(snapshot, stamp)
+
+    def _show(self, scene, is_new):
+        stamp = self.get_clock().now().to_msg()
+        for marker in scene.markers:
+            marker.header.stamp = stamp
+        self.publisher.publish(scene)
+
+    def _hide(self):
+        self.publisher.publish(MarkerArray(markers=[Marker(action=Marker.DELETEALL)]))
+
+
+class MapRelay(_SnapshotRelay):
+    """Global planner grids -> /global_map and /global_costmap (latched).
+
+    Grids are published only when a new snapshot arrives. A stale map is kept on
+    screen (it is still the last known map); RViz just stops receiving updates.
+    The planner is optional, so failed requests back off and warnings are rarer.
+    """
+    label = 'global map'
+    warning_period = 30.0
+
+    def __init__(self, port=8766, timeout=3.0, stale_after=5.0, poll_rate=2.0):
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        super().__init__('fp_map_relay', port, timeout, stale_after, poll_rate)
+        self.publishers_by_topic = {topic: self.create_publisher(OccupancyGrid, '/' + topic, qos)
+                                    for topic in GRID_TOPICS}
+
+    def _error_wait(self):
+        return 2.0
+
+    def _decode(self, snapshot, stamp):
+        return decode_grids(snapshot, stamp)
+
+    def _show(self, grids, is_new):
+        if not is_new:
+            return
+        stamp = self.get_clock().now().to_msg()
+        for topic, msg in grids.items():
+            msg.header.stamp = msg.info.map_load_time = stamp
+            self.publishers_by_topic[topic].publish(msg)
+
+    def _hide(self):
+        pass
+
+
 def main(args=None):
     from rclpy.executors import ExternalShutdownException
 
@@ -263,6 +383,8 @@ def main(args=None):
     parser.add_argument('--stale-after', type=float, default=3.0,
                         help='Clear markers after this many seconds without a new snapshot')
     parser.add_argument('--poll-rate', type=float, default=5.0, help='Maximum HTTP requests per second')
+    parser.add_argument('--planner-port', type=int, default=8766,
+                        help='Local SSH forwarding port of the global planner maps (0 disables)')
     cli, ros_args = parser.parse_known_args(args)
     # Applied before rclpy.init: this CLI never joins the physical robot network.
     os.environ['ROS_DOMAIN_ID'] = os.environ.get('FP_RVIZ_DOMAIN_ID', '166')
@@ -271,13 +393,19 @@ def main(args=None):
     for name in ('ROS_STATIC_PEERS', 'ROS_DISCOVERY_SERVER', 'ROS_SUPER_CLIENT'):
         os.environ.pop(name, None)
     rclpy.init(args=ros_args)
-    node = VisualizationRelay(cli.port, timeout=cli.timeout,
-                              stale_after=cli.stale_after, poll_rate=cli.poll_rate)
+    nodes = [VisualizationRelay(cli.port, timeout=cli.timeout,
+                                stale_after=cli.stale_after, poll_rate=cli.poll_rate)]
+    if cli.planner_port > 0:
+        nodes.append(MapRelay(cli.planner_port, timeout=cli.timeout))
+    executor = SingleThreadedExecutor()
+    for node in nodes:
+        executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        for node in nodes:
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

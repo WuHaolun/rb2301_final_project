@@ -60,6 +60,38 @@ class OccupancyGridTests(unittest.TestCase):
         self.assertFalse(grid.occupied()[iy, ix])
 
 
+class MapValuesTests(unittest.TestCase):
+    '''int8 values published as nav_msgs/OccupancyGrid for RViz.'''
+    def test_occupancy_values_mark_unknown_free_and_occupied(self):
+        grid = OccupancyGrid((0.0, 0.0))
+        grid.integrate_scan((0.0, 0.0), [[1.0, 0.0]], [True])
+        values = grid.to_map_values()
+        self.assertEqual(values.dtype, np.int8)
+        self.assertEqual(values.shape, grid.shape)
+        ix, iy = grid.world_to_cell([1.0, 0.0])[0]
+        fx, fy = grid.world_to_cell([0.5, 0.0])[0]
+        ux, uy = grid.world_to_cell([0.0, 2.0])[0]
+        self.assertGreater(values[iy, ix], 50) # hit, indexed [row=iy, col=ix]
+        self.assertTrue(0 <= values[fy, fx] < 50) # beam passed through
+        self.assertEqual(values[uy, ux], -1) # never seen
+        grid.log_odds[:] = grid.max_evidence
+        self.assertTrue((grid.to_map_values() == 100).all())
+
+    def test_costmap_values_follow_rviz_costmap_scheme(self):
+        planner = GlobalPlanner((0.0, 0.0))
+        add_walls(planner, [wall((1.0, -1.0), (1.0, 1.0))])
+        planner.update_costmap()
+        occupied = planner.grid.occupied()
+        values = planner.costmap.to_map_values(occupied)
+        self.assertEqual(values.dtype, np.int8)
+        self.assertTrue((values[occupied] == 100).all())
+        self.assertTrue((values[planner.costmap.lethal & ~occupied] == 99).all())
+        soft = (planner.costmap.soft_cost > 0) & ~planner.costmap.lethal
+        self.assertTrue(soft.any())
+        self.assertTrue(((values[soft] >= 1) & (values[soft] <= 98)).all())
+        self.assertTrue((values[planner.costmap.soft_cost == 0] == 0).all())
+
+
 class PlannerTests(unittest.TestCase):
     def test_goal_behind_u_wall_is_reached_around_it(self):
         planner = GlobalPlanner((0.0, 0.0))

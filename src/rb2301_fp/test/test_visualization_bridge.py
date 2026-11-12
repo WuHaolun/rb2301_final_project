@@ -26,7 +26,10 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rb2301_fp.obstacle_course import ObstacleCourseNode
-from rb2301_fp.visualization_bridge import VisualizationRelay, VisualizationSnapshotServer
+from rb2301_fp.visualization_bridge import (MapRelay, VisualizationRelay, VisualizationSnapshotServer,
+                                            decode_grids, encode_grid)
+from rb2301_fp.global_planner import GlobalPlannerNode
+from nav_msgs.msg import OccupancyGrid
 
 
 class VisualizationBridgeTests(unittest.TestCase):
@@ -222,6 +225,110 @@ class VisualizationBridgeTests(unittest.TestCase):
         self.assertTrue(self.relay._connected)
 
 
+class MapBridgeTests(unittest.TestCase):
+    '''Global planner grids: planner snapshot server -> MapRelay -> local latched topics.'''
+    @classmethod
+    def setUpClass(cls):
+        rclpy.init(domain_id=169)
+
+    @classmethod
+    def tearDownClass(cls):
+        rclpy.shutdown()
+
+    def setUp(self):
+        self.planner = GlobalPlannerNode(is_simulation=True, parameter_overrides=[
+            Parameter('visualization_transport', value='ssh'), Parameter('visualization_port', value=0)])
+        for timer in (self.planner.map_timer, self.planner.plan_timer, self.planner.map_publish_timer):
+            timer.cancel()
+        self.relay = MapRelay(self.planner._snapshot_server.port, poll_rate=20.0)
+        self.relay.timer.cancel()
+        self.reader = Node('fp_map_test_reader')
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.reader)
+
+    def tearDown(self):
+        self.executor.shutdown()
+        self.reader.destroy_node()
+        self.relay.destroy_node()
+        self.planner.destroy_node()
+
+    def wait_for(self, predicate, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(predicate(), 'Timed out waiting for the HTTP worker')
+
+    def test_grids_reach_late_local_subscriber_once_per_snapshot(self):
+        stamp = self.planner.get_clock().now().to_msg()
+        self.planner.set_pose(1.0, -2.0, 0.0, stamp)
+        wall = np.column_stack((np.full(50, 2.0), np.linspace(-3.0, -1.0, 50)))
+        for _ in range(3):
+            self.planner.planner.update_map((1.0, -2.0), wall, np.ones(len(wall), bool))
+        # SSH mode: no DDS subscribers needed, grids go to the loopback-only snapshot server.
+        self.assertEqual(self.planner._snapshot_server._server.server_address[0], '127.0.0.1')
+        self.planner.map_publish_timer_callback()
+        self.wait_for(lambda: self.relay._frame is not None)
+
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        received = {'global_map': [], 'global_costmap': []}
+        with mock.patch.object(self.relay.publishers_by_topic['global_map'], 'publish',
+                               wraps=self.relay.publishers_by_topic['global_map'].publish) as publish:
+            self.relay.poll_snapshot()
+            self.relay.poll_snapshot() # same snapshot: not republished
+            self.assertEqual(publish.call_count, 1)
+        for topic, messages in received.items():
+            self.reader.create_subscription(OccupancyGrid, '/' + topic, messages.append, qos)
+        deadline = time.monotonic() + 5.0
+        while not all(received.values()) and time.monotonic() < deadline:
+            self.executor.spin_once(timeout_sec=0.05)
+        self.assertTrue(all(received.values()), 'Latched grids did not reach a late subscriber')
+
+        grid = self.planner.planner.grid
+        self.planner.planner.update_costmap()
+        expected = {'global_map': grid.to_map_values(),
+                    'global_costmap': self.planner.planner.costmap.to_map_values(grid.occupied())}
+        for topic, messages in received.items():
+            msg = messages[-1]
+            self.assertEqual(msg.header.frame_id, 'fp_visualization')
+            self.assertEqual((msg.info.width, msg.info.height), (grid.size, grid.size))
+            self.assertAlmostEqual(msg.info.resolution, grid.resolution, places=6)
+            self.assertAlmostEqual(msg.info.origin.position.x, grid.origin[0], places=6)
+            self.assertAlmostEqual(msg.info.origin.position.y, grid.origin[1], places=6)
+            data = np.array(msg.data, dtype=np.int8).reshape(grid.shape)
+            np.testing.assert_array_equal(data, expected[topic])
+        self.assertTrue((expected['global_map'] == 100).any())
+
+    def test_planner_disconnect_keeps_map_and_backs_off(self):
+        self.relay._stale_after = 0.2
+        self.planner.set_pose(0.0, 0.0, 0.0, self.planner.get_clock().now().to_msg())
+        self.planner.map_publish_timer_callback()
+        self.wait_for(lambda: self.relay._frame is not None)
+        self.relay.poll_snapshot()
+        port = self.planner._snapshot_server.port
+        self.planner._snapshot_server.close()
+        self.wait_for(lambda: self.relay._last_error is not None)
+        time.sleep(0.25)
+        with mock.patch.object(self.relay.publishers_by_topic['global_map'], 'publish') as publish:
+            self.relay.poll_snapshot() # stale: warn, but publish nothing (RViz keeps the last map)
+            publish.assert_not_called()
+        self.assertFalse(self.relay._connected)
+        self.assertGreaterEqual(self.relay._error_wait(), 1.0)
+        self.assertEqual(port, self.relay._port)
+
+    def test_decode_rejects_bad_grids(self):
+        values = np.zeros((4, 5), dtype=np.int8)
+        good = dict(version=1, grids={'global_map': encode_grid(values, 0.05, (1.0, 2.0), 'f')})
+        msg = decode_grids(good, Marker().header.stamp)['global_map']
+        self.assertEqual((msg.info.width, msg.info.height), (5, 4))
+        self.assertAlmostEqual(msg.info.origin.position.y, 2.0)
+        for bad in (dict(version=2, grids={}),
+                    dict(version=1, grids={'other': good['grids']['global_map']}),
+                    dict(version=1, grids={'global_map': dict(good['grids']['global_map'], width=6)})):
+            with self.assertRaises((ValueError, KeyError)):
+                decode_grids(bad, Marker().header.stamp)
+
+
 class SshLauncherTests(unittest.TestCase):
     def test_launcher_isolates_local_children_and_cleans_up_owned_tunnel(self):
         launcher = Path(__file__).resolve().parents[3] / 'rviz_fp.sh'
@@ -275,6 +382,7 @@ class SshLauncherTests(unittest.TestCase):
             ssh = [json.loads(line) for line in (root / 'ssh.jsonl').read_text().splitlines()]
             self.assertIn('-M', ssh[0])
             self.assertIn('127.0.0.1:8765:127.0.0.1:8765', ssh[0])
+            self.assertIn('127.0.0.1:8766:127.0.0.1:8766', ssh[0])
             self.assertIn('exit', ssh[-1])
 
 

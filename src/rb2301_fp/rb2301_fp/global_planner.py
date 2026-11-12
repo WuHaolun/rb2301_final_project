@@ -6,7 +6,11 @@ controller. The planning itself lives in global_planner_core.py (no ROS).
 
 Subscribes: scan, odom (simulation) or the Optitrack pose (real robot), global_goal
 Publishes:  global_path (nav_msgs/Path, frame id = visualization_frame)
+            global_map, global_costmap (nav_msgs/OccupancyGrid, latched, for RViz)
+            With -p visualization_transport:=ssh the two grids are instead served as JSON
+            snapshots on 127.0.0.1:visualization_port (8766) for rviz_fp.sh --ssh.
 """
+import array
 import math
 import os
 import time
@@ -16,7 +20,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy, QoSProfile, qos_profile_sensor_data
 from geometry_msgs.msg import PointStamped, PoseStamped
-from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg, Odometry, Path
 from sensor_msgs.msg import LaserScan
 
 from rb2301_fp import global_planner_core as params # all defaults live at the top of global_planner_core.py
@@ -45,7 +49,18 @@ class GlobalPlannerNode(Node):
         self.scan_step = self.declare_parameter('scan_step', params.SCAN_STEP).value
         map_update_rate = self.declare_parameter('map_update_rate', params.MAP_UPDATE_RATE).value
         plan_rate = self.declare_parameter('plan_rate', params.PLAN_RATE).value
+        map_publish_rate = self.declare_parameter('map_publish_rate', params.MAP_PUBLISH_RATE).value
         self.frame_id = self.declare_parameter('visualization_frame', 'fp_visualization').value
+        transport = self.declare_parameter('visualization_transport', 'ros').value
+        if transport not in ('ros', 'ssh'):
+            raise ValueError('visualization_transport must be ros or ssh')
+        self._snapshot_server = None
+        if transport == 'ssh' and map_publish_rate > 0:
+            from rb2301_fp.visualization_bridge import VisualizationSnapshotServer
+            port = self.declare_parameter('visualization_port', 8766).value
+            self._snapshot_server = VisualizationSnapshotServer(port)
+            self.get_logger().info(
+                'SSH map visualization: http://127.0.0.1:{}/snapshot'.format(self._snapshot_server.port))
         self.log_period = params.LOG_PERIOD
 
         #======State======#
@@ -75,10 +90,14 @@ class GlobalPlannerNode(Node):
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.sub_goal = self.create_subscription(PointStamped, 'global_goal', self.goal_callback, latched)
         self.path_publisher = self.create_publisher(Path, 'global_path', 10)
+        self.map_publisher = self.create_publisher(OccupancyGridMsg, 'global_map', latched)
+        self.costmap_publisher = self.create_publisher(OccupancyGridMsg, 'global_costmap', latched)
 
         self.map_timer = self.create_timer(1.0 / map_update_rate, self.map_timer_callback)
         self.plan_timer = self.create_timer(1.0 / plan_rate, self.plan_timer_callback)
         self.log_timer = self.create_timer(self.log_period, self.log_timer_callback)
+        if map_publish_rate > 0:
+            self.map_publish_timer = self.create_timer(1.0 / map_publish_rate, self.map_publish_timer_callback)
 
 #========Callbacks=======#
     def odometer_callback(self, msg:Odometry):
@@ -167,6 +186,48 @@ class GlobalPlannerNode(Node):
             msg.poses.append(pose)
         self.path_publisher.publish(msg)
 
+    def map_publish_timer_callback(self):
+        '''Occupancy and inflated cost grids for RViz; ROS topics are skipped while nobody subscribes.'''
+        if self.planner is None:
+            return
+        ssh = self._snapshot_server is not None
+        want_map = ssh or self.map_publisher.get_subscription_count() > 0
+        want_costmap = ssh or self.costmap_publisher.get_subscription_count() > 0
+        grids = {}
+        if want_map:
+            grids['global_map'] = self.planner.grid.to_map_values()
+        if want_costmap:
+            self.planner.update_costmap() # no-op unless the map changed since the last plan
+            grids['global_costmap'] = self.planner.costmap.to_map_values(self.planner.grid.occupied())
+        if ssh:
+            from rb2301_fp.visualization_bridge import encode_grid
+            grid = self.planner.grid
+            try:
+                self._snapshot_server.publish_snapshot(grids={
+                    topic: encode_grid(values, grid.resolution, grid.origin, self.frame_id)
+                    for topic, values in grids.items()})
+            except (ValueError, TypeError) as error:
+                self.get_logger().warning('Map snapshot skipped: {}'.format(error))
+            return
+        if 'global_map' in grids:
+            self.map_publisher.publish(self.grid_msg(grids['global_map']))
+        if 'global_costmap' in grids:
+            self.costmap_publisher.publish(self.grid_msg(grids['global_costmap']))
+
+    def grid_msg(self, values:np.ndarray) -> OccupancyGridMsg:
+        '''int8 [row, col] values on the planner grid -> nav_msgs/OccupancyGrid.'''
+        grid = self.planner.grid
+        msg = OccupancyGridMsg()
+        msg.header.frame_id = self.frame_id
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.info.map_load_time = msg.header.stamp
+        msg.info.resolution = float(grid.resolution)
+        msg.info.width = msg.info.height = int(grid.size)
+        msg.info.origin.position.x, msg.info.origin.position.y = float(grid.origin[0]), float(grid.origin[1])
+        msg.info.origin.orientation.w = 1.0
+        msg.data = array.array('b', np.ascontiguousarray(values, dtype=np.int8).tobytes())
+        return msg
+
     def log_timer_callback(self):
         def summary(values):
             if not values:
@@ -178,6 +239,11 @@ class GlobalPlannerNode(Node):
             f"skipped_scans={self._skipped_scans}, goal_reachable={reached}")
         self._stats = {'map': [], 'plan': []}
         self._skipped_scans = 0
+
+    def destroy_node(self):
+        if self._snapshot_server is not None:
+            self._snapshot_server.close()
+        return super().destroy_node()
 
 
 def main(args=None):

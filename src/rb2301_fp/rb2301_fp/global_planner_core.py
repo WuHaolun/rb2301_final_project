@@ -43,13 +43,14 @@ PATH_SPACING = 0.1              # [m] spacing of the published path points (ROS:
 MAP_UPDATE_RATE = 5.0           # [Hz] (ROS: map_update_rate)
 PLAN_RATE = 1.0                 # [Hz] (ROS: plan_rate)
 LOG_PERIOD = 10.0               # [s] between timing log lines
+MAP_PUBLISH_RATE = 1.0          # [Hz] global_map / global_costmap for RViz; 0 disables (ROS: map_publish_rate)
 
 # LiDAR mounting from nanocar_description.urdf, same as ObstacleCourseNode.update_ob
 LIDAR_OFFSET = 0.11423          # [m] forward of the pose
 LIDAR_YAW = 3.1416              # [rad]
 
 # Path following (controller side)
-PATH_LOOKAHEAD = 0.8            # [m] along the path to the DWA waypoint (ROS on fp.sh: path_lookahead)
+PATH_LOOKAHEAD = 0.7            # [m] along the path to the DWA waypoint (ROS on fp.sh: path_lookahead)
 PATH_TIMEOUT = 3.0              # [s] older paths are ignored, DWA gets the final goal (ROS on fp.sh: path_timeout)
 PATH_SEARCH_WINDOW = 3.0        # [m] closest path point is only searched this far along, so a folded path cannot jump ahead
 PATH_GOAL_TOLERANCE = 0.3       # [m] a path ending this close to the final goal counts as reaching it
@@ -154,6 +155,17 @@ class OccupancyGrid():
         '''Boolean occupancy; unknown cells are free.'''
         return self.log_odds > self.occupied_threshold
 
+    def to_map_values(self) -> np.ndarray:
+        '''int8 [row, col] values for nav_msgs/OccupancyGrid (RViz "map" scheme).
+
+        Unknown (log-odds exactly 0) -> -1; otherwise log-odds mapped linearly from
+        [-max_evidence, max_evidence] to [0, 100], so 50 is "no net evidence".
+        '''
+        values = np.rint(50.0 + 50.0 * self.log_odds / self.max_evidence)
+        values = np.clip(values, 0, 100).astype(np.int8)
+        values[self.log_odds == 0.0] = -1
+        return values
+
 
 class CostMap():
     '''Inflation of an occupancy grid without scipy.
@@ -205,6 +217,17 @@ class CostMap():
         span = max(self.cost_radius - self.inflation_radius, 1e-9)
         self.soft_cost = np.where(np.isfinite(clearance),
                                   np.clip((self.cost_radius - clearance) / span, 0.0, 1.0), 0.0)
+
+    def to_map_values(self, occupied:np.ndarray) -> np.ndarray:
+        '''int8 [row, col] values for nav_msgs/OccupancyGrid in RViz's "costmap" scheme.
+
+        Obstacle -> 100 (lethal colour), inflated -> 99 (inscribed colour),
+        soft cost -> 1..98, free -> 0. Call after update().
+        '''
+        values = np.where(self.soft_cost > 0.0, 1.0 + np.rint(97.0 * self.soft_cost), 0.0).astype(np.int8)
+        values[self.lethal] = 99
+        values[occupied] = 100
+        return values
 
 
 #============================================planner==============================================================================

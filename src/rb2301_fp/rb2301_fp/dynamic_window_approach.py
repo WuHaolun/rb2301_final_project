@@ -46,7 +46,7 @@ class Config:
             self.yaw_sample_size = 20
             
             self.dt = 0.1  # [s] Time tick for motion prediction
-            self.predict_time = 2.5  # [s]
+            self.predict_time = 2.0  # [s]
 
             self.to_goal_node_cost_gain = 0.25      # in angle
             self.to_goal_node_dist_cost_gain = 2 # in distance
@@ -76,31 +76,30 @@ class Config:
         else:   #IRL param
                         # robot parameter
             self.max_speed = 0.25         # [m/s]
-            self.min_speed = -0.0  # [m/s]
+            self.min_speed = 0.0  # [m/s]
             self.max_yaw_rate = 0.6 #Same as the move2d output limit #90.0 * math.pi / 180.0  # [rad/s]
-            self.max_accel = 0.25  # [m/ss]
+            self.max_accel = 0.40  # [m/ss]
             self.max_delta_yaw_rate = 90.0 * math.pi / 180.0  # [rad/ss]
             
             self.v_resolution = 0.02  # [m/s] NO LONGER USED
             self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s] NO LONGER USED
 
-            self.v_sample_size = 4
-            self.yaw_sample_size = 15
+            self.v_sample_size = 5
+            self.yaw_sample_size = 18
 
             self.dt = 0.1  # [s] Time tick for motion prediction
-            self.predict_time = 2.5  # [s]
+            self.predict_time = 2.0  # [s]
 
-            self.to_goal_node_cost_gain = 0.125      # in angle
-            self.to_goal_node_dist_cost_gain = 1.25  # in distance
+            self.to_goal_node_cost_gain = 0.3      # in angle
+            self.to_goal_node_dist_cost_gain = 1.25 #1.25  # in distance
 
             self.to_goal_heading_cost_gain = 0.1        #in angle
             self.to_goal_heading_dist_cost_gain = 0.5   #in distance
 
-            self.speed_cost_gain = 2.5
-            self.speed_back_gain = 0.2
+            self.speed_cost_gain = 2.0
 
             self.obstacle_cost_gain = 0.3
-            self.obstacle_turn_cost_gain = 1.5
+            self.obstacle_turn_cost_gain = 1.0
 
             self.robot_stuck_flag_cons = 0.00000001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
@@ -162,11 +161,17 @@ def calc_dynamic_window(x, config):
     Vs = [config.min_speed, config.max_speed,
           -config.max_yaw_rate, config.max_yaw_rate]
 
+    # Measured speeds come from pose differences and can spike outside the robot
+    # limits; clamp them first so the window below never inverts (lo > hi), which
+    # would sample reverse speeds with min_speed = 0 or speeds above max_speed.
+    v = min(max(x[3], config.min_speed), config.max_speed)
+    yaw_rate = min(max(x[4], -config.max_yaw_rate), config.max_yaw_rate)
+
     # Dynamic window from motion model
-    Vd = [x[3] - config.max_accel * config.dt,
-          x[3] + config.max_accel * config.dt,
-          x[4] - config.max_delta_yaw_rate * config.dt,
-          x[4] + config.max_delta_yaw_rate * config.dt]
+    Vd = [v - config.max_accel * config.dt,
+          v + config.max_accel * config.dt,
+          yaw_rate - config.max_delta_yaw_rate * config.dt,
+          yaw_rate + config.max_delta_yaw_rate * config.dt]
 
     #  [v_min, v_max, yaw_rate_min, yaw_rate_max]
     dw = [max(Vs[0], Vd[0]), min(Vs[1], Vd[1]),

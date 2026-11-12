@@ -102,6 +102,19 @@ source install/setup.bash
 bash fp.sh --ros-args -p visualization_transport:=ssh
 ```
 
+To also see the global planner's map, start it in SSH mode in a second robot terminal.
+It serves `global_map` and `global_costmap` as JSON snapshots at
+`http://127.0.0.1:8766/snapshot` (once a second, `map_publish_rate`); the launcher
+forwards that port too and the relay republishes them locally as latched
+`nav_msgs/OccupancyGrid` topics for the **Global Map** / **Global Costmap** displays:
+
+```bash
+bash gp.sh --ros-args -p visualization_transport:=ssh
+```
+
+The planner is optional: without it the map relay only logs a warning every 30 s
+and retries every 2 s. When the planner stops, RViz keeps showing its last map.
+
 On the laptop, build the updated package once, then use the SSH launcher:
 
 ```bash
@@ -152,9 +165,11 @@ launcher already enables the longer timeout, worker and short-gap buffering.
 Sync the new `visualization_bridge.py` and restart the robot node to enable
 keep-alive/gzip as well.
 
-For a busy local port, launch with `FP_RVIZ_PORT=8766 bash rviz_fp.sh --ssh ...`.
-The robot port can be set with `-p visualization_port:=8766`; set
-`FP_RVIZ_REMOTE_PORT=8766` on the laptop launcher to match it. An optional
+For a busy local port, launch with `FP_RVIZ_PORT=8767 bash rviz_fp.sh --ssh ...`.
+The robot port can be set with `-p visualization_port:=8767`; set
+`FP_RVIZ_REMOTE_PORT=8767` on the laptop launcher to match it. The planner's map
+port works the same way with `FP_RVIZ_PLANNER_PORT` / `FP_RVIZ_PLANNER_REMOTE_PORT`
+(default 8766; `FP_RVIZ_PLANNER_PORT=0` turns the map relay off). An optional
 `FP_RVIZ_DOMAIN_ID` changes the launcher's private local domain (default 166).
 The launcher also accepts `FP_RVIZ_TIMEOUT` (seconds, default 3),
 `FP_RVIZ_STALE_AFTER` (seconds, default 3), and `FP_RVIZ_POLL_RATE` (Hz, default 5).

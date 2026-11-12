@@ -74,7 +74,7 @@ class PathFollowingTests(unittest.TestCase):
         self.straight_path(node)
         node.pose = np.array([0.5, 0.05, 0.0])
         node.timer_callback()
-        np.testing.assert_allclose(dwa.call_args.kwargs['goal'], [1.3, 0.0], atol=1e-9)
+        np.testing.assert_allclose(dwa.call_args.kwargs['goal'], [0.5 + node.path_follower.lookahead, 0.0], atol=1e-9)
         np.testing.assert_array_equal(node._goal.goal_node, final_goal)
         # Near the end of the path the waypoint is the final goal.
         node.pose = np.array([*final_goal - [0.4, 0.0], 0.0])
@@ -124,7 +124,7 @@ class PathFollowingTests(unittest.TestCase):
         markers = scene()
         self.assertEqual(markers['global_path'].action, Marker.ADD)
         self.assertEqual(markers['path_waypoint'].action, Marker.ADD)
-        self.assertAlmostEqual(markers['path_waypoint'].points[0].x, 0.8)
+        self.assertAlmostEqual(markers['path_waypoint'].points[0].x, node.path_follower.lookahead)
         node.path_follower.stamp -= node.path_follower.timeout + 0.1
         self.assertEqual(scene()['global_path'].action, Marker.DELETE)
         self.assertEqual(scene()['path_waypoint'].action, Marker.DELETE)
