@@ -46,7 +46,10 @@ LOG_PERIOD = 10.0               # [s] between timing log lines
 MAP_PUBLISH_RATE = 1.0          # [Hz] global_map / global_costmap for RViz; 0 disables (ROS: map_publish_rate)
 
 # LiDAR mounting from nanocar_description.urdf, same as ObstacleCourseNode.update_ob
-LIDAR_OFFSET = 0.11423          # [m] forward of the pose
+# How far the LiDAR sits forward of the pose point. Simulation reports the pose at the rear
+# axle (URDF base_link); on the real robot it is the Optitrack rigid-body pivot.
+LIDAR_OFFSET_SIM = 0.11423      # [m] simulation
+LIDAR_OFFSET_REAL = 0.0         # [m] real robot: TUNE (pivot is roughly at the LiDAR)
 LIDAR_YAW = 3.1416              # [rad]
 
 # Path following (controller side)

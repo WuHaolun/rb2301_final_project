@@ -35,6 +35,7 @@ class GlobalPlannerNode(Node):
         super().__init__('globalplanner', parameter_overrides=parameter_overrides)
         self.get_logger().info("Starting GlobalPlannerNode")
         self.is_simulation = is_simulation
+        self.lidar_offset = params.LIDAR_OFFSET_SIM if is_simulation else params.LIDAR_OFFSET_REAL
 
         #======Parameters======#
         self.resolution = self.declare_parameter('grid_resolution', params.GRID_RESOLUTION).value
@@ -150,7 +151,7 @@ class GlobalPlannerNode(Node):
         r, a = r[valid], a[valid]
         is_hit = r <= self.mapping_range
         r = np.minimum(r, self.mapping_range)
-        sensor = np.array((pose[0] + params.LIDAR_OFFSET * math.cos(yaw), pose[1] + params.LIDAR_OFFSET * math.sin(yaw)))
+        sensor = np.array((pose[0] + self.lidar_offset * math.cos(yaw), pose[1] + self.lidar_offset * math.sin(yaw)))
         return sensor, sensor + np.column_stack((r * np.cos(a), r * np.sin(a))), is_hit
 
     def map_timer_callback(self):

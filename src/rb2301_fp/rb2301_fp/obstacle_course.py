@@ -7,7 +7,8 @@ import numpy as np
 import rclpy
 from typing import List, Tuple
 from rb2301_fp import dynamic_window_approach
-from rb2301_fp.global_planner_core import PATH_LOOKAHEAD, PATH_TIMEOUT, PathFollower
+from rb2301_fp.global_planner_core import (LIDAR_OFFSET_REAL, LIDAR_OFFSET_SIM, PATH_LOOKAHEAD,
+                                           PATH_TIMEOUT, PathFollower)
 
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
@@ -120,6 +121,8 @@ class ObstacleCourseNode(Node):
 
         self.is_simulation = is_simulation
         self.dwa_config = dynamic_window_approach.Config(is_simulation=self.is_simulation)
+        # LiDAR distance forward of the pose point; tune at the top of global_planner_core.py
+        self.lidar_offset = LIDAR_OFFSET_SIM if is_simulation else LIDAR_OFFSET_REAL
         self.calibrate = calibrate # Real robot: only print poses, never drive
         self.raw_pose = None # Pose exactly as Optitrack reported it (real robot only)
         self.frame = self.course = None
@@ -352,6 +355,7 @@ class ObstacleCourseNode(Node):
         if config.robot_type == dynamic_window_approach.RobotType.rectangle:
             outline = np.array([[-1, 1], [1, 1], [1, -1], [-1, -1], [-1, 1]])
             outline = outline * [config.robot_length / 2, config.robot_width / 2]
+            outline = outline + [config.robot_center_offset, 0.0]
         else:
             angles = np.linspace(0.0, 2 * math.pi, 49)
             outline = config.robot_radius * np.column_stack(
@@ -413,12 +417,12 @@ class ObstacleCourseNode(Node):
             return
         r = self.last_scan
         yaw = np.deg2rad(self.pose[2])
-        # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
+        # LiDAR mounting: self.lidar_offset forward of the pose point, yaw=3.1416 rad.
         # Each kept beam is scan_step raw beams apart, so the angle step scales with it.
         a = msg.angle_min + np.arange(r.size) * msg.angle_increment * self.scan_step + 3.1416 + yaw
         valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
-        x = self.pose[0] + 0.11423 * np.cos(yaw)
-        y = self.pose[1] + 0.11423 * np.sin(yaw)
+        x = self.pose[0] + self.lidar_offset * np.cos(yaw)
+        y = self.pose[1] + self.lidar_offset * np.sin(yaw)
         self._ob = np.column_stack((x + r[valid] * np.cos(a[valid]), y + r[valid] * np.sin(a[valid])))
 
     def yaw_from_quaternion(self, q):

@@ -70,6 +70,9 @@ class Config:
             # if robot_type == RobotType.rectangle
             self.robot_width = 0.24  # [m] for collision check
             self.robot_length = 0.24  # [m] for collision check
+            # Footprint centre, forward of the pose point (negative = behind it).
+            # 0 keeps the rectangle centred on the pose.
+            self.robot_center_offset = 0.0  # [m]
 
             # obstacles [x(m) y(m), ....]
         
@@ -111,6 +114,10 @@ class Config:
             # if robot_type == RobotType.rectangle
             self.robot_width = 0.20  # [m] for collision check
             self.robot_length = 0.22  # [m] for collision check
+            # Footprint centre, forward of the pose point (negative = behind it). TUNE:
+            # the Optitrack pivot sits about 3-5 cm ahead of the robot centre, so the
+            # rectangle reaches length/2 + offset ahead and length/2 - offset behind.
+            self.robot_center_offset = -0.04  # [m]
             # obstacles [x(m) y(m), ....]
 
 
@@ -269,13 +276,15 @@ def _obstacle_cost_setup(config):
     if config.robot_type == RobotType.rectangle:
         half_length = config.robot_length / 2
         half_width = config.robot_width / 2
-        collision_radius = np.hypot(half_length, half_width)
+        offset = config.robot_center_offset
+        # Farthest corner from the pose point.
+        collision_radius = np.hypot(half_length + abs(offset), half_width)
         # Same broad-phase radius as calc_obstacle_cost (trajectories are float64).
         collision_radius += 8 * np.finfo(np.float64).eps * max(1.0, collision_radius)
-        return collision_radius, half_length, half_width
+        return collision_radius, half_length, half_width, offset
     if config.robot_type == RobotType.circle:
-        return config.robot_radius, None, None
-    return 0.0, None, None
+        return config.robot_radius, None, None, 0.0
+    return 0.0, None, None, 0.0
 
 
 def _batch_obstacle_cost(trajectories, ob, config, nearest_distance):  
@@ -317,7 +326,7 @@ def _batch_obstacle_cost(trajectories, ob, config, nearest_distance):
         return np.array([calc_obstacle_cost(trajectory, ob, config)
                          for trajectory in trajectories])
 
-    collision_radius, half_length, half_width = _obstacle_cost_setup(config)
+    collision_radius, half_length, half_width, center_offset = _obstacle_cost_setup(config)
     traj_x = trajectories[:, :, 0]
     traj_y = trajectories[:, :, 1]
     yaw = trajectories[:, :, 2]
@@ -417,7 +426,8 @@ def _batch_obstacle_cost(trajectories, ob, config, nearest_distance):
                 sine = np.sin(heading)
                 local_x = near_dx * cosine + near_dy * sine
                 local_y = -near_dx * sine + near_dy * cosine
-                inside = (np.abs(local_x) <= half_length) & (np.abs(local_y) <= half_width)
+                inside = ((np.abs(local_x - center_offset) <= half_length)
+                          & (np.abs(local_y) <= half_width))
                 cost[near_c[inside]] = float("Inf")
             elif config.robot_type == RobotType.circle:
                 cost[near_c] = float("Inf")
@@ -550,7 +560,8 @@ def calc_obstacle_cost(trajectory, ob, config):
     if config.robot_type == RobotType.rectangle:
         half_length = config.robot_length / 2
         half_width = config.robot_width / 2
-        collision_radius = np.hypot(half_length, half_width)
+        offset = config.robot_center_offset
+        collision_radius = np.hypot(half_length + abs(offset), half_width)
         # Keep rotated corners in the broad phase despite floating-point rounding.
         collision_radius += 8 * np.finfo(r.dtype).eps * max(1.0, collision_radius)
         obstacle_indices, step_indices = np.nonzero(r <= collision_radius)
@@ -564,7 +575,7 @@ def calc_obstacle_cost(trajectory, ob, config):
             nearby_dy = dy[obstacle_indices, step_indices]
             local_x = nearby_dx * cosine + nearby_dy * sine
             local_y = -nearby_dx * sine + nearby_dy * cosine
-            if ((np.abs(local_x) <= half_length)
+            if ((np.abs(local_x - offset) <= half_length)
                     & (np.abs(local_y) <= half_width)).any():
                 return float("Inf")
     elif config.robot_type == RobotType.circle:
@@ -649,6 +660,7 @@ def plot_robot(x, y, yaw, config):  # pragma: no cover
                             [config.robot_width / 2, config.robot_width / 2,
                              - config.robot_width / 2, -config.robot_width / 2,
                              config.robot_width / 2]])
+        outline[0, :] += config.robot_center_offset
         Rot1 = np.array([[math.cos(yaw), math.sin(yaw)],
                          [-math.sin(yaw), math.cos(yaw)]])
         outline = (outline.T.dot(Rot1)).T
