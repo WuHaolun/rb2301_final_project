@@ -47,7 +47,7 @@ class FinalStageTests(unittest.TestCase):
         self.assertEqual(self.node.stage, 'gate')
         self.assertIsNone(self.dwa.call_args.kwargs['goal_heading'])
         np.testing.assert_array_equal(self.dwa.call_args.kwargs['goal'], [2., 0.])
-        self.assertEqual(self.node.dwa_config.to_goal_cost_gain, 1.)
+        self.assertEqual(self.node.dwa_config.to_goal_node_cost_gain, .5)
         self.assertEqual(self.node.dwa_config.speed_cost_gain, 1.)
         self.assertFalse(self.node._final_stage_started)
 

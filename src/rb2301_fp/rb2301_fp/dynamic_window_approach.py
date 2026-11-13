@@ -74,6 +74,12 @@ class Config:
             # 0 keeps the rectangle centred on the pose.
             self.robot_center_offset = 0.0  # [m]
 
+            # Overrides applied once the planner reports the gate passed (gate_passed topic,
+            # single-point-goal mode with the global path): attribute name -> value. Likely
+            # candidates: max_speed, speed_cost_gain, obstacle_cost_gain, obstacle_turn_cost_gain,
+            # predict_time, to_goal_node_cost_gain, to_goal_node_dist_cost_gain. Empty = unchanged. TUNE
+            self.final_zone = {}
+
             # obstacles [x(m) y(m), ....]
         
         else:   #IRL param
@@ -91,7 +97,7 @@ class Config:
             self.yaw_sample_size = 18
 
             self.dt = 0.1  # [s] Time tick for motion prediction
-            self.predict_time = 2.0  # [s]
+            self.predict_time = 1.2  # [s]
 
             self.to_goal_node_cost_gain = 0.3      # in angle
             self.to_goal_node_dist_cost_gain = 1.25 #1.25  # in distance
@@ -101,7 +107,7 @@ class Config:
 
             self.speed_cost_gain = 2.0
 
-            self.obstacle_cost_gain = 0.3
+            self.obstacle_cost_gain = 0.2
             self.obstacle_turn_cost_gain = 1.0
 
             self.robot_stuck_flag_cons = 0.00000001  #was 0.001 constant to prevent robot stucked
@@ -118,9 +124,26 @@ class Config:
             # the Optitrack pivot sits about 3-5 cm ahead of the robot centre, so the
             # rectangle reaches length/2 + offset ahead and length/2 - offset behind.
             self.robot_center_offset = -0.04  # [m]
+
+            # Overrides applied once the planner reports the gate passed (gate_passed topic,
+            # single-point-goal mode with the global path): attribute name -> value. Likely
+            # candidates: max_speed, speed_cost_gain, obstacle_cost_gain, obstacle_turn_cost_gain,
+            # predict_time, to_goal_node_cost_gain, to_goal_node_dist_cost_gain. Empty = unchanged. TUNE
+            self.final_zone = {}
             # obstacles [x(m) y(m), ....]
 
+        self._check_final_zone() # a typo fails at start-up, not when the gate is passed
 
+    def _check_final_zone(self):
+        unknown = [name for name in self.final_zone if name == 'final_zone' or not hasattr(self, name)]
+        if unknown:
+            raise AttributeError('Config.final_zone: unknown DWA parameter(s) {}'.format(', '.join(sorted(unknown))))
+
+    def apply_final_zone(self):
+        '''Set the final-zone overrides; only names that are already Config attributes are accepted.'''
+        self._check_final_zone()
+        for name, value in self.final_zone.items():
+            setattr(self, name, value)
 
     @property
     def robot_type(self):

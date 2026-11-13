@@ -73,7 +73,8 @@ class GoalSwitchingTests(unittest.TestCase):
         self.assertEqual(self.node.close_threshold, 1.)
         self.assertEqual(self.node._sub_goal, ['+x'])
         self.assertEqual(self.dwa.call_args.kwargs['goal_heading'], '+x')
-        self.assertIsNone(self.node.dwa_config.to_goal_cost_gain)
+        self.assertFalse(hasattr(self.node.dwa_config, 'to_goal_cost_gain'))
+        self.assertIsNotNone(self.node.dwa_config.to_goal_node_cost_gain)
 
     def test_gate_target_takes_priority_over_deadend(self):
         self.node._sub_goal = ['+x']

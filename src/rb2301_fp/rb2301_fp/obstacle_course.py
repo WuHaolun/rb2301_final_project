@@ -266,6 +266,9 @@ class ObstacleCourseNode(Node):
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.goal_publisher = self.create_publisher(PointStamped, 'global_goal', latched)
         self.sub_path = self.create_subscription(Path, 'global_path', self.path_callback, 10)
+        # Published once by the planner when the robot has driven through the gate.
+        self.gate_center = None
+        self.sub_gate = self.create_subscription(PointStamped, 'gate_passed', self.gate_passed_callback, latched)
         if self._goal.goal_node is not None:
             self.publish_global_goal()
 
@@ -279,6 +282,16 @@ class ObstacleCourseNode(Node):
     def path_callback(self, msg:Path):
         points = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         self.path_follower.set_path(points, time.monotonic())
+
+    def gate_passed_callback(self, msg:PointStamped):
+        """Gate passed (single-point-goal mode with the global path): switch DWA to its final-zone parameters once."""
+        if self.gate_center is not None or not (self.single_point_goal and self.use_global_path):
+            return
+        self.dwa_config.apply_final_zone()
+        self.gate_center = np.array((msg.point.x, msg.point.y))
+        self.stage = 'final_zone'
+        self.get_logger().info(
+            f'Gate passed at {self.gate_center}: final zone, DWA overrides {self.dwa_config.final_zone}')
 
     def dwa_goal(self):
         """Goal handed to DWA: a waypoint on a fresh global path, otherwise the final goal."""
@@ -350,6 +363,10 @@ class ObstacleCourseNode(Node):
             'path_waypoint', Marker.SPHERE_LIST,
             [waypoint] if following and waypoint is not None else [],
             (1.0, 0.5, 0.0), 0.09, stamp, z=0.08))
+        # Green sphere at the gate centre once the planner reports it passed.
+        scene.markers.append(self._rviz_marker(
+            'gate', Marker.SPHERE_LIST, [] if self.gate_center is None else [self.gate_center],
+            (0.0, 0.8, 0.2), 0.15, stamp, z=0.08))
 
         config = self.dwa_config
         if config.robot_type == dynamic_window_approach.RobotType.rectangle:
@@ -493,7 +510,7 @@ class ObstacleCourseNode(Node):
 
     def update_state(self)->np.ndarray:
         """update speed and orientation using pose[], keep vel and omega"""
-        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self.actual_velocity[0], self.actual_velocity[1] ])
+        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self.actual_velocity[0], self._state[4] ])
 
     def update_actual_velocity(self, stamp):
         """use differentiation of position to estimate the forward speed(m/s) and angular speed(rad/s)"""
@@ -520,8 +537,11 @@ class ObstacleCourseNode(Node):
     def set_dwa_param(self,to_goal_heading=None, to_goal_node=None,speed=0.5, ob=0.01, pre_time=1.5, v_res=0.01):  #Update DWA param online
         self.dwa_config.speed_cost_gain = speed
         self.dwa_config.obstacle_cost_gain = ob
-        self.dwa_config.to_goal_heading_cost_gain = to_goal_heading
-        self.dwa_config.to_goal_cost_gain = to_goal_node
+        # A goal gain left as None keeps its current value (DWA multiplies by it).
+        if to_goal_heading is not None:
+            self.dwa_config.to_goal_heading_cost_gain = to_goal_heading
+        if to_goal_node is not None:
+            self.dwa_config.to_goal_node_cost_gain = to_goal_node
         self.dwa_config.predict_time = pre_time
         self.dwa_config.v_resolution = v_res
 #=====================================stage_para_initialization==========================================
@@ -537,7 +557,7 @@ class ObstacleCourseNode(Node):
             return
         self._final_stage_started = True
         self.close_threshold /= 2
-        self.set_dwa_param(to_goal_heading=0.5,speed=1.5,ob=0.5,pre_time=1.5,v_res=0.01)
+        self.set_dwa_param(to_goal_heading=0.8,speed=3.5,ob=2.5,pre_time=2.0,v_res=0.01)
         self.get_logger().info('enter final stage!dwa param changed')
 
     def gate_stage(self):
@@ -559,7 +579,7 @@ class ObstacleCourseNode(Node):
                 f'{name}={elapsed * 1000.0:.3f} ms' if elapsed is not None
                 else f'{name}=skipped'
                 for name, elapsed in timings.items())
-            self.get_logger().info(
+            self.get_logger().debug(
                 f'Performance: {phases}, timer_callback={callback_ms:.3f} ms')
 
     def _run_timer_callback(self, timings): #real timer_callback
@@ -667,6 +687,7 @@ class ObstacleCourseNode(Node):
             timings['DWA'] = time.perf_counter() - dwa_started
         self._rviz_predicted_trajectory = predicted_trajectory
         self.move_2D(u[0],0.0,u[1])
+        self._state[4] = u[1]
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
 
