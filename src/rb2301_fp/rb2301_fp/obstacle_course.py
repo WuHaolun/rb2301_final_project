@@ -510,7 +510,7 @@ class ObstacleCourseNode(Node):
 
     def update_state(self)->np.ndarray:
         """update speed and orientation using pose[], keep vel and omega"""
-        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self.actual_velocity[0], self._state[4] ])
+        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self._state[3], self._state[4] ])
 
     def update_actual_velocity(self, stamp):
         """use differentiation of position to estimate the forward speed(m/s) and angular speed(rad/s)"""
@@ -557,7 +557,7 @@ class ObstacleCourseNode(Node):
             return
         self._final_stage_started = True
         self.close_threshold /= 2
-        self.set_dwa_param(to_goal_heading=0.8,speed=3.5,ob=2.5,pre_time=2.0,v_res=0.01)
+        self.set_dwa_param(to_goal_heading=0.3,speed=3.5,ob=2.5,pre_time=2.0,v_res=0.01)
         self.get_logger().info('enter final stage!dwa param changed')
 
     def gate_stage(self):
@@ -687,7 +687,7 @@ class ObstacleCourseNode(Node):
             timings['DWA'] = time.perf_counter() - dwa_started
         self._rviz_predicted_trajectory = predicted_trajectory
         self.move_2D(u[0],0.0,u[1])
-        self._state[4] = u[1]
+        self._state[3] , self._state[4] = u[0], u[1]
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
 

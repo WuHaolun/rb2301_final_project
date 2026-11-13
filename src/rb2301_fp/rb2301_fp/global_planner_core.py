@@ -70,7 +70,7 @@ GATE_BAND_CELLS = 3             # adjacent grid lines OR-ed together, for wall t
 GATE_LATERAL_REACH = 1.0        # [m] how far sideways from the robot's track the gap edges are searched
 GATE_FREE_FRACTION = 0.8        # share of gap cells that must be observed free, not unknown
 GATE_CONFIRM = 2                # consecutive positive checks before latching
-GATE_ARM_LATERAL = 0.3          # [m] sideways displacement from the first pose before detection is armed; 0 disables
+GATE_ARM_LATERAL = 0.0           # [m] sideways displacement from the first pose before detection is armed; 0 disables
 GATE_MOTION_WINDOW = 0.4        # [m] recent travel used to check the robot moves along the final direction
 #================================================================================================
 
@@ -416,7 +416,7 @@ class GlobalPlanner():
 
 #============================================gate detection=======================================================================
 _DIRECTIONS = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1)} # direction -> (world axis, sign)
-_GATE_MOTION_ALIGNMENT = 0.7    # share of the recent displacement that must lie along the final direction
+_GATE_MOTION_ALIGNMENT = 0.4    # share of the recent displacement that must lie along the final direction
 _GATE_TRAIL_LIMIT = 500         # most trail entries kept, e.g. while standing still
 
 
