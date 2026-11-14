@@ -84,7 +84,7 @@ class Config:
         
         else:   #IRL param
                         # robot parameter
-            self.max_speed = 0.25         # [m/s]
+            self.max_speed = 0.40         # [m/s]
             self.min_speed = 0.0  # [m/s]
             self.max_yaw_rate = 0.6 #Same as the move2d output limit #90.0 * math.pi / 180.0  # [rad/s]
             self.max_accel = 0.60  # [m/ss]

@@ -557,7 +557,7 @@ class ObstacleCourseNode(Node):
             return
         self._final_stage_started = True
         self.close_threshold /= 2
-        self.set_dwa_param(to_goal_heading=0.3,speed=3.5,ob=2.5,pre_time=2.0,v_res=0.01)
+        self.set_dwa_param(to_goal_heading=0.3,speed=3.5,ob=3.5,pre_time=1.2,v_res=0.01)
         self.get_logger().info('enter final stage!dwa param changed')
 
     def gate_stage(self):
@@ -595,7 +595,7 @@ class ObstacleCourseNode(Node):
                 #self.get_logger().info(f"optitrack ({ox:+.3f}, {oy:+.3f}, {oh:+7.1f} deg)  ->  maze ({self.pose[0]:+.3f}, {self.pose[1]:+.3f}, {self.pose[2]:+7.1f} deg)")
             return # Calibration mode: look, don't drive
 
-        #self.get_logger().info(f"Pose: {self.pose}")
+        self.get_logger().info(f"Pose: {self.pose}")
 
         self._initialize_point_goal()
         
