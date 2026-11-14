@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .vscode/
 src/rb2301_gz/worlds/
+.venv/

@@ -32,7 +32,7 @@ class Config:
         if is_simulation:
             # robot parameter
             self.max_speed = 0.4  # [m/s]
-            self.min_speed = -0.1  # [m/s]
+            self.min_speed = -0.0  # [m/s]
             #self.max_yaw_rate = 90.0 * math.pi / 180.0  # [rad/s]
 
             self.max_yaw_rate = 1.0
@@ -46,7 +46,7 @@ class Config:
             self.yaw_sample_size = 20
             
             self.dt = 0.1  # [s] Time tick for motion prediction
-            self.predict_time = 2.5  # [s]
+            self.predict_time = 2.0  # [s]
 
             self.to_goal_node_cost_gain = 0.25      # in angle
             self.to_goal_node_dist_cost_gain = 2 # in distance
@@ -60,7 +60,7 @@ class Config:
             self.obstacle_cost_gain = 0.1
             self.obstacle_turn_cost_gain = 1.2
 
-            self.robot_stuck_flag_cons = 0.012  #was 0.001 constant to prevent robot stucked
+            self.robot_stuck_flag_cons = 0.0000012  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
 
             # if robot_type == RobotType.circle
@@ -70,39 +70,47 @@ class Config:
             # if robot_type == RobotType.rectangle
             self.robot_width = 0.24  # [m] for collision check
             self.robot_length = 0.24  # [m] for collision check
+            # Footprint centre, forward of the pose point (negative = behind it).
+            # 0 keeps the rectangle centred on the pose.
+            self.robot_center_offset = 0.0  # [m]
+
+            # Overrides applied once the planner reports the gate passed (gate_passed topic,
+            # single-point-goal mode with the global path): attribute name -> value. Likely
+            # candidates: max_speed, speed_cost_gain, obstacle_cost_gain, obstacle_turn_cost_gain,
+            # predict_time, to_goal_node_cost_gain, to_goal_node_dist_cost_gain. Empty = unchanged. TUNE
+            self.final_zone = {}
 
             # obstacles [x(m) y(m), ....]
         
         else:   #IRL param
                         # robot parameter
-            self.max_speed = 0.25         # [m/s]
-            self.min_speed = -0.0  # [m/s]
+            self.max_speed = 0.40         # [m/s]
+            self.min_speed = 0.0  # [m/s]
             self.max_yaw_rate = 0.6 #Same as the move2d output limit #90.0 * math.pi / 180.0  # [rad/s]
-            self.max_accel = 0.25  # [m/ss]
+            self.max_accel = 0.60  # [m/ss]
             self.max_delta_yaw_rate = 90.0 * math.pi / 180.0  # [rad/ss]
             
             self.v_resolution = 0.02  # [m/s] NO LONGER USED
             self.yaw_rate_resolution = 1.0 * math.pi / 180.0  # [rad/s] NO LONGER USED
 
-            self.v_sample_size = 4
-            self.yaw_sample_size = 15
+            self.v_sample_size = 5
+            self.yaw_sample_size = 18
 
             self.dt = 0.1  # [s] Time tick for motion prediction
-            self.predict_time = 2.5  # [s]
+            self.predict_time = 1.2  # [s]
 
-            self.to_goal_node_cost_gain = 0.125      # in angle
-            self.to_goal_node_dist_cost_gain = 1.25  # in distance
+            self.to_goal_node_cost_gain = 0.3      # in angle
+            self.to_goal_node_dist_cost_gain = 1.25 #1.25  # in distance
 
             self.to_goal_heading_cost_gain = 0.1        #in angle
             self.to_goal_heading_dist_cost_gain = 0.5   #in distance
 
-            self.speed_cost_gain = 2.5
-            self.speed_back_gain = 0.2
+            self.speed_cost_gain = 2.0
 
-            self.obstacle_cost_gain = 0.3
-            self.obstacle_turn_cost_gain = 1.5
+            self.obstacle_cost_gain = 0.2
+            self.obstacle_turn_cost_gain = 1.0
 
-            self.robot_stuck_flag_cons = 0.001  #was 0.001 constant to prevent robot stucked
+            self.robot_stuck_flag_cons = 0.00000001  #was 0.001 constant to prevent robot stucked
             self.robot_type = RobotType.rectangle
 
             # if robot_type == RobotType.circle
@@ -112,9 +120,30 @@ class Config:
             # if robot_type == RobotType.rectangle
             self.robot_width = 0.20  # [m] for collision check
             self.robot_length = 0.22  # [m] for collision check
+            # Footprint centre, forward of the pose point (negative = behind it). TUNE:
+            # the Optitrack pivot sits about 3-5 cm ahead of the robot centre, so the
+            # rectangle reaches length/2 + offset ahead and length/2 - offset behind.
+            self.robot_center_offset = -0.04  # [m]
+
+            # Overrides applied once the planner reports the gate passed (gate_passed topic,
+            # single-point-goal mode with the global path): attribute name -> value. Likely
+            # candidates: max_speed, speed_cost_gain, obstacle_cost_gain, obstacle_turn_cost_gain,
+            # predict_time, to_goal_node_cost_gain, to_goal_node_dist_cost_gain. Empty = unchanged. TUNE
+            self.final_zone = {}
             # obstacles [x(m) y(m), ....]
 
+        self._check_final_zone() # a typo fails at start-up, not when the gate is passed
 
+    def _check_final_zone(self):
+        unknown = [name for name in self.final_zone if name == 'final_zone' or not hasattr(self, name)]
+        if unknown:
+            raise AttributeError('Config.final_zone: unknown DWA parameter(s) {}'.format(', '.join(sorted(unknown))))
+
+    def apply_final_zone(self):
+        '''Set the final-zone overrides; only names that are already Config attributes are accepted.'''
+        self._check_final_zone()
+        for name, value in self.final_zone.items():
+            setattr(self, name, value)
 
     @property
     def robot_type(self):
@@ -162,11 +191,17 @@ def calc_dynamic_window(x, config):
     Vs = [config.min_speed, config.max_speed,
           -config.max_yaw_rate, config.max_yaw_rate]
 
+    # Measured speeds come from pose differences and can spike outside the robot
+    # limits; clamp them first so the window below never inverts (lo > hi), which
+    # would sample reverse speeds with min_speed = 0 or speeds above max_speed.
+    v = min(max(x[3], config.min_speed), config.max_speed)
+    yaw_rate = min(max(x[4], -config.max_yaw_rate), config.max_yaw_rate)
+
     # Dynamic window from motion model
-    Vd = [x[3] - config.max_accel * config.dt,
-          x[3] + config.max_accel * config.dt,
-          x[4] - config.max_delta_yaw_rate * config.dt,
-          x[4] + config.max_delta_yaw_rate * config.dt]
+    Vd = [v - config.max_accel * config.dt,
+          v + config.max_accel * config.dt,
+          yaw_rate - config.max_delta_yaw_rate * config.dt,
+          yaw_rate + config.max_delta_yaw_rate * config.dt]
 
     #  [v_min, v_max, yaw_rate_min, yaw_rate_max]
     dw = [max(Vs[0], Vd[0]), min(Vs[1], Vd[1]),
@@ -264,13 +299,15 @@ def _obstacle_cost_setup(config):
     if config.robot_type == RobotType.rectangle:
         half_length = config.robot_length / 2
         half_width = config.robot_width / 2
-        collision_radius = np.hypot(half_length, half_width)
+        offset = config.robot_center_offset
+        # Farthest corner from the pose point.
+        collision_radius = np.hypot(half_length + abs(offset), half_width)
         # Same broad-phase radius as calc_obstacle_cost (trajectories are float64).
         collision_radius += 8 * np.finfo(np.float64).eps * max(1.0, collision_radius)
-        return collision_radius, half_length, half_width
+        return collision_radius, half_length, half_width, offset
     if config.robot_type == RobotType.circle:
-        return config.robot_radius, None, None
-    return 0.0, None, None
+        return config.robot_radius, None, None, 0.0
+    return 0.0, None, None, 0.0
 
 
 def _batch_obstacle_cost(trajectories, ob, config, nearest_distance):  
@@ -312,7 +349,7 @@ def _batch_obstacle_cost(trajectories, ob, config, nearest_distance):
         return np.array([calc_obstacle_cost(trajectory, ob, config)
                          for trajectory in trajectories])
 
-    collision_radius, half_length, half_width = _obstacle_cost_setup(config)
+    collision_radius, half_length, half_width, center_offset = _obstacle_cost_setup(config)
     traj_x = trajectories[:, :, 0]
     traj_y = trajectories[:, :, 1]
     yaw = trajectories[:, :, 2]
@@ -412,7 +449,8 @@ def _batch_obstacle_cost(trajectories, ob, config, nearest_distance):
                 sine = np.sin(heading)
                 local_x = near_dx * cosine + near_dy * sine
                 local_y = -near_dx * sine + near_dy * cosine
-                inside = (np.abs(local_x) <= half_length) & (np.abs(local_y) <= half_width)
+                inside = ((np.abs(local_x - center_offset) <= half_length)
+                          & (np.abs(local_y) <= half_width))
                 cost[near_c[inside]] = float("Inf")
             elif config.robot_type == RobotType.circle:
                 cost[near_c] = float("Inf")
@@ -545,7 +583,8 @@ def calc_obstacle_cost(trajectory, ob, config):
     if config.robot_type == RobotType.rectangle:
         half_length = config.robot_length / 2
         half_width = config.robot_width / 2
-        collision_radius = np.hypot(half_length, half_width)
+        offset = config.robot_center_offset
+        collision_radius = np.hypot(half_length + abs(offset), half_width)
         # Keep rotated corners in the broad phase despite floating-point rounding.
         collision_radius += 8 * np.finfo(r.dtype).eps * max(1.0, collision_radius)
         obstacle_indices, step_indices = np.nonzero(r <= collision_radius)
@@ -559,7 +598,7 @@ def calc_obstacle_cost(trajectory, ob, config):
             nearby_dy = dy[obstacle_indices, step_indices]
             local_x = nearby_dx * cosine + nearby_dy * sine
             local_y = -nearby_dx * sine + nearby_dy * cosine
-            if ((np.abs(local_x) <= half_length)
+            if ((np.abs(local_x - offset) <= half_length)
                     & (np.abs(local_y) <= half_width)).any():
                 return float("Inf")
     elif config.robot_type == RobotType.circle:
@@ -644,6 +683,7 @@ def plot_robot(x, y, yaw, config):  # pragma: no cover
                             [config.robot_width / 2, config.robot_width / 2,
                              - config.robot_width / 2, -config.robot_width / 2,
                              config.robot_width / 2]])
+        outline[0, :] += config.robot_center_offset
         Rot1 = np.array([[math.cos(yaw), math.sin(yaw)],
                          [-math.sin(yaw), math.cos(yaw)]])
         outline = (outline.T.dot(Rot1)).T

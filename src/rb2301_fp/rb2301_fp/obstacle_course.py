@@ -7,12 +7,14 @@ import numpy as np
 import rclpy
 from typing import List, Tuple
 from rb2301_fp import dynamic_window_approach
+from rb2301_fp.global_planner_core import (LIDAR_OFFSET_REAL, LIDAR_OFFSET_SIM, PATH_LOOKAHEAD,
+                                           PATH_TIMEOUT, PathFollower)
 
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy, QoSProfile, qos_profile_sensor_data
-from geometry_msgs.msg import Point, PoseStamped
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Point, PointStamped, PoseStamped
+from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import ColorRGBA
@@ -56,6 +58,17 @@ def load_frame(robot_number:int) -> tuple:
         frame["heading_offset_deg"] = parser.getfloat("heading_offsets", str(robot_number))
     course = {k: parser.getfloat("course", k, fallback=0.0) for k in ("origin_x", "origin_y", "rotation_deg")}
     return frame, course
+
+def robot_number_from_domain(default:int=3) -> int:
+    '''On the Bingda robots ROS_DOMAIN_ID is the robot's number, so the Optitrack topic is picked automatically.'''
+    domain = os.environ.get("ROS_DOMAIN_ID", "")
+    return int(domain) if domain.isdigit() and 1 <= int(domain) <= 99 else default
+
+def yaw_from_quaternion(q) -> float:
+    '''Returns yaw angle (in rad) for orientation based on given quaternion input q'''
+    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+    return np.arctan2(siny_cosp, cosy_cosp)
 
 
 class LidarNode(Node):
@@ -108,6 +121,8 @@ class ObstacleCourseNode(Node):
 
         self.is_simulation = is_simulation
         self.dwa_config = dynamic_window_approach.Config(is_simulation=self.is_simulation)
+        # LiDAR distance forward of the pose point; tune at the top of global_planner_core.py
+        self.lidar_offset = LIDAR_OFFSET_SIM if is_simulation else LIDAR_OFFSET_REAL
         self.calibrate = calibrate # Real robot: only print poses, never drive
         self.raw_pose = None # Pose exactly as Optitrack reported it (real robot only)
         self.frame = self.course = None
@@ -195,9 +210,7 @@ class ObstacleCourseNode(Node):
             self.subscription = self.create_subscription(Odometry, 'odom', self.odometer_callback, qos_profile_sensor_data)
         else:
             qos_profile = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
-            # On the Bingda robots ROS_DOMAIN_ID is the robot's number, so the Optitrack topic is picked automatically
-            domain = os.environ.get("ROS_DOMAIN_ID", "")
-            self.robot_number = int(domain) if domain.isdigit() and 1 <= int(domain) <= 99 else 3
+            self.robot_number = robot_number_from_domain()
             self.frame, self.course = load_frame(self.robot_number)
             self.get_logger().info(f"Reading pose from /vrpn_mocap/bingda_{self.robot_number:03d}/pose")
 
@@ -213,6 +226,7 @@ class ObstacleCourseNode(Node):
 
         self.pose = None
         self.init_rviz_visualization()
+        self.init_global_path()
 #==============================================================================================================
     # RViz visualization
     def init_rviz_visualization(self):
@@ -240,6 +254,50 @@ class ObstacleCourseNode(Node):
         else:
             raise ValueError('visualization_transport must be ros or ssh')
         self._rviz_timer = self.create_timer(0.1, self.publish_rviz_visualization)
+
+    # Global path (from global_planner.py, run with gp.sh)
+    def init_global_path(self):
+        """Publish the frozen goal for the planner and follow its path with a lookahead waypoint."""
+        self.use_global_path = self.declare_parameter('use_global_path', True).value
+        self.path_follower = PathFollower(
+            lookahead=self.declare_parameter('path_lookahead', PATH_LOOKAHEAD).value, # defaults: top of global_planner_core.py
+            timeout=self.declare_parameter('path_timeout', PATH_TIMEOUT).value)
+        latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.goal_publisher = self.create_publisher(PointStamped, 'global_goal', latched)
+        self.sub_path = self.create_subscription(Path, 'global_path', self.path_callback, 10)
+        # Published once by the planner when the robot has driven through the gate.
+        self.gate_center = None
+        self.sub_gate = self.create_subscription(PointStamped, 'gate_passed', self.gate_passed_callback, latched)
+        if self._goal.goal_node is not None:
+            self.publish_global_goal()
+
+    def publish_global_goal(self):
+        msg = PointStamped()
+        msg.header.frame_id = self._rviz_frame
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.point.x, msg.point.y = float(self._goal.goal_node[0]), float(self._goal.goal_node[1])
+        self.goal_publisher.publish(msg)
+
+    def path_callback(self, msg:Path):
+        points = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        self.path_follower.set_path(points, time.monotonic())
+
+    def gate_passed_callback(self, msg:PointStamped):
+        """Gate passed (single-point-goal mode with the global path): switch DWA to its final-zone parameters once."""
+        if self.gate_center is not None or not (self.single_point_goal and self.use_global_path):
+            return
+        self.dwa_config.apply_final_zone()
+        self.gate_center = np.array((msg.point.x, msg.point.y))
+        self.stage = 'final_zone'
+        self.get_logger().info(
+            f'Gate passed at {self.gate_center}: final zone, DWA overrides {self.dwa_config.final_zone}')
+
+    def dwa_goal(self):
+        """Goal handed to DWA: a waypoint on a fresh global path, otherwise the final goal."""
+        if not (self.single_point_goal and self.use_global_path):
+            return self._goal.goal_node
+        return self.path_follower.select_goal(self.pose[:2], self._goal.goal_node, time.monotonic())
 
     def _rviz_marker(self, name, marker_type, points, color, size, stamp, z=0.03):
         """Build one marker in controller coordinates; empty points delete it."""
@@ -293,10 +351,28 @@ class ObstacleCourseNode(Node):
             'reference_goal', Marker.LINE_LIST, goal,
             (0.0, 0.2, 1.0), 0.035, stamp))
 
+        # Global path (magenta) and the waypoint DWA is steering to (orange), only while they are used.
+        following = (self.use_global_path and self.single_point_goal
+                     and self.path_follower.has_fresh_path(time.monotonic()))
+        scene.markers.append(self._rviz_marker(
+            'global_path', Marker.LINE_STRIP,
+            self.path_follower.path if following and len(self.path_follower.path) >= 2 else [],
+            (0.9, 0.0, 0.9), 0.02, stamp, z=0.02))
+        waypoint = self.path_follower.waypoint
+        scene.markers.append(self._rviz_marker(
+            'path_waypoint', Marker.SPHERE_LIST,
+            [waypoint] if following and waypoint is not None else [],
+            (1.0, 0.5, 0.0), 0.09, stamp, z=0.08))
+        # Green sphere at the gate centre once the planner reports it passed.
+        scene.markers.append(self._rviz_marker(
+            'gate', Marker.SPHERE_LIST, [] if self.gate_center is None else [self.gate_center],
+            (0.0, 0.8, 0.2), 0.15, stamp, z=0.08))
+
         config = self.dwa_config
         if config.robot_type == dynamic_window_approach.RobotType.rectangle:
             outline = np.array([[-1, 1], [1, 1], [1, -1], [-1, -1], [-1, 1]])
             outline = outline * [config.robot_length / 2, config.robot_width / 2]
+            outline = outline + [config.robot_center_offset, 0.0]
         else:
             angles = np.linspace(0.0, 2 * math.pi, 49)
             outline = config.robot_radius * np.column_stack(
@@ -358,19 +434,17 @@ class ObstacleCourseNode(Node):
             return
         r = self.last_scan
         yaw = np.deg2rad(self.pose[2])
-        # LiDAR mounting from nanocar_description.urdf: x=0.11423 m, yaw=3.1416 rad.
+        # LiDAR mounting: self.lidar_offset forward of the pose point, yaw=3.1416 rad.
         # Each kept beam is scan_step raw beams apart, so the angle step scales with it.
         a = msg.angle_min + np.arange(r.size) * msg.angle_increment * self.scan_step + 3.1416 + yaw
         valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
-        x = self.pose[0] + 0.11423 * np.cos(yaw)
-        y = self.pose[1] + 0.11423 * np.sin(yaw)
+        x = self.pose[0] + self.lidar_offset * np.cos(yaw)
+        y = self.pose[1] + self.lidar_offset * np.sin(yaw)
         self._ob = np.column_stack((x + r[valid] * np.cos(a[valid]), y + r[valid] * np.sin(a[valid])))
 
     def yaw_from_quaternion(self, q):
         '''Returns yaw angle (in rad) for orientation based on given quaternion input q'''
-        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-        return np.arctan2(siny_cosp, cosy_cosp)
+        return yaw_from_quaternion(q)
 
     def optitrack_callback(self, msg:PoseStamped):
         '''Callback to calculate 2D pose info from Optitrack node. Pose info includes x and y coordinates, as well as heading in degrees.
@@ -419,6 +493,7 @@ class ObstacleCourseNode(Node):
         angle = forward_yaw + math.radians(self.point_goal_left_angle_deg)
         offset = self.point_goal_distance * np.array([math.cos(angle), math.sin(angle)])
         self._goal.goal_node = self.pose[:2] + offset
+        self.publish_global_goal()
         self.get_logger().info(
             f'Fixed point goal: {self._goal.goal_node}, '
             f'{self.point_goal_distance} m at {self.point_goal_left_angle_deg} deg left '
@@ -435,7 +510,7 @@ class ObstacleCourseNode(Node):
 
     def update_state(self)->np.ndarray:
         """update speed and orientation using pose[], keep vel and omega"""
-        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self.actual_velocity[0], self.actual_velocity[1] ])
+        return np.array([self.pose[0], self.pose[1], np.deg2rad(self.pose[2]), self._state[3], self._state[4] ])
 
     def update_actual_velocity(self, stamp):
         """use differentiation of position to estimate the forward speed(m/s) and angular speed(rad/s)"""
@@ -462,8 +537,11 @@ class ObstacleCourseNode(Node):
     def set_dwa_param(self,to_goal_heading=None, to_goal_node=None,speed=0.5, ob=0.01, pre_time=1.5, v_res=0.01):  #Update DWA param online
         self.dwa_config.speed_cost_gain = speed
         self.dwa_config.obstacle_cost_gain = ob
-        self.dwa_config.to_goal_heading_cost_gain = to_goal_heading
-        self.dwa_config.to_goal_cost_gain = to_goal_node
+        # A goal gain left as None keeps its current value (DWA multiplies by it).
+        if to_goal_heading is not None:
+            self.dwa_config.to_goal_heading_cost_gain = to_goal_heading
+        if to_goal_node is not None:
+            self.dwa_config.to_goal_node_cost_gain = to_goal_node
         self.dwa_config.predict_time = pre_time
         self.dwa_config.v_resolution = v_res
 #=====================================stage_para_initialization==========================================
@@ -479,7 +557,7 @@ class ObstacleCourseNode(Node):
             return
         self._final_stage_started = True
         self.close_threshold /= 2
-        self.set_dwa_param(to_goal_heading=0.5,speed=1.5,ob=0.5,pre_time=1.5,v_res=0.01)
+        self.set_dwa_param(to_goal_heading=0.3,speed=3.5,ob=3.5,pre_time=1.2,v_res=0.01)
         self.get_logger().info('enter final stage!dwa param changed')
 
     def gate_stage(self):
@@ -501,7 +579,7 @@ class ObstacleCourseNode(Node):
                 f'{name}={elapsed * 1000.0:.3f} ms' if elapsed is not None
                 else f'{name}=skipped'
                 for name, elapsed in timings.items())
-            self.get_logger().info(
+            self.get_logger().debug(
                 f'Performance: {phases}, timer_callback={callback_ms:.3f} ms')
 
     def _run_timer_callback(self, timings): #real timer_callback
@@ -517,7 +595,7 @@ class ObstacleCourseNode(Node):
                 #self.get_logger().info(f"optitrack ({ox:+.3f}, {oy:+.3f}, {oh:+7.1f} deg)  ->  maze ({self.pose[0]:+.3f}, {self.pose[1]:+.3f}, {self.pose[2]:+7.1f} deg)")
             return # Calibration mode: look, don't drive
 
-        #self.get_logger().info(f"Pose: {self.pose}")
+        self.get_logger().info(f"Pose: {self.pose}")
 
         self._initialize_point_goal()
         
@@ -600,7 +678,7 @@ class ObstacleCourseNode(Node):
             u, predicted_trajectory = dynamic_window_approach.dwa_control(
                 self,
                 x=self._state,
-                goal=self._goal.goal_node,
+                goal=self.dwa_goal(),
                 goal_heading=None if self.single_point_goal else self._goal.goal_heading,
                 ob=self._ob,
                 config=self.dwa_config,
@@ -609,6 +687,7 @@ class ObstacleCourseNode(Node):
             timings['DWA'] = time.perf_counter() - dwa_started
         self._rviz_predicted_trajectory = predicted_trajectory
         self.move_2D(u[0],0.0,u[1])
+        self._state[3] , self._state[4] = u[0], u[1]
         #dynamic_window_approach.animate(predicted_trajectory,self._state,self._goal,self._ob, self._segmentation)
 
 

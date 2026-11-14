@@ -102,6 +102,19 @@ source install/setup.bash
 bash fp.sh --ros-args -p visualization_transport:=ssh
 ```
 
+To also see the global planner's map, start it in SSH mode in a second robot terminal.
+It serves `global_map` and `global_costmap` as JSON snapshots at
+`http://127.0.0.1:8766/snapshot` (once a second, `map_publish_rate`); the launcher
+forwards that port too and the relay republishes them locally as latched
+`nav_msgs/OccupancyGrid` topics for the **Global Map** / **Global Costmap** displays:
+
+```bash
+bash gp.sh --ros-args -p visualization_transport:=ssh
+```
+
+The planner is optional: without it the map relay only logs a warning every 30 s
+and retries every 2 s. When the planner stops, RViz keeps showing its last map.
+
 On the laptop, build the updated package once, then use the SSH launcher:
 
 ```bash
@@ -152,9 +165,11 @@ launcher already enables the longer timeout, worker and short-gap buffering.
 Sync the new `visualization_bridge.py` and restart the robot node to enable
 keep-alive/gzip as well.
 
-For a busy local port, launch with `FP_RVIZ_PORT=8766 bash rviz_fp.sh --ssh ...`.
-The robot port can be set with `-p visualization_port:=8766`; set
-`FP_RVIZ_REMOTE_PORT=8766` on the laptop launcher to match it. An optional
+For a busy local port, launch with `FP_RVIZ_PORT=8767 bash rviz_fp.sh --ssh ...`.
+The robot port can be set with `-p visualization_port:=8767`; set
+`FP_RVIZ_REMOTE_PORT=8767` on the laptop launcher to match it. The planner's map
+port works the same way with `FP_RVIZ_PLANNER_PORT` / `FP_RVIZ_PLANNER_REMOTE_PORT`
+(default 8766; `FP_RVIZ_PLANNER_PORT=0` turns the map relay off). An optional
 `FP_RVIZ_DOMAIN_ID` changes the launcher's private local domain (default 166).
 The launcher also accepts `FP_RVIZ_TIMEOUT` (seconds, default 3),
 `FP_RVIZ_STALE_AFTER` (seconds, default 3), and `FP_RVIZ_POLL_RATE` (Hz, default 5).
@@ -212,6 +227,44 @@ To disable visualization:
 ```bash
 ./fp.sh --ros-args -p visualization_enabled:=false
 ```
+
+## Global planner (optional third process)
+
+`global_planner` builds an occupancy grid from the LiDAR and pose, runs A* to the
+controller's fixed goal about once a second, and publishes `nav_msgs/Path` on
+`global_path`. The controller then hands DWA a waypoint `path_lookahead` metres
+along that path instead of the far goal. Without a fresh path (planner not
+running, empty path, or older than `path_timeout`), the controller passes the
+final goal exactly as before. The core is in `global_planner_core.py` (no ROS),
+the node in `global_planner.py`.
+
+Simulation, three terminals in the workspace folder:
+
+```bash
+./gz_fp.sh
+./fp.sh
+./gp.sh
+```
+
+Real robot: run `./gp.sh` in an extra tmux pane next to `fp.sh`. It detects
+simulation vs. robot and reads the Optitrack pose the same way as the controller.
+RViz shows the path (magenta) and the current waypoint (orange).
+
+Controller parameters (`./fp.sh --ros-args -p name:=value`):
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `use_global_path` | `true` | `false` ignores the path; DWA gets the final goal as before |
+| `path_lookahead` | `0.8` | metres along the path to the DWA waypoint |
+| `path_timeout` | `3.0` | seconds before a path counts as stale |
+
+Planner parameters (`./gp.sh --ros-args -p name:=value`): `grid_resolution`
+(0.05 m), `grid_half_size` (10 m, grid centred on the first pose),
+`mapping_range` (3.5 m), `max_mapping_yaw_rate` (0.5 rad/s, scans taken while
+turning faster are skipped), `robot_half_width` (0.12 m) + `inflation_margin`
+(0.04 m) as impassable inflation, `cost_radius` (0.3 m) and `cost_weight` (3.0)
+for the soft cost that keeps paths mid-corridor, `map_update_rate` (5 Hz),
+`plan_rate` (1 Hz). It logs map-update and planning times every 10 s.
 
 ## The simulation map
 
