@@ -89,7 +89,8 @@ class VisualizationBridgeTests(unittest.TestCase):
             self.executor.spin_once(timeout_sec=0.05)
         self.assertTrue(received, 'Local transient-local relay did not publish')
         scene = {m.ns: m for m in received[-1].markers}
-        self.assertEqual(len(scene), 10)
+        self.assertEqual(len(scene), 11)
+        self.assertEqual(scene['gate'].action, Marker.DELETE) # gate not passed yet
         self.assertEqual(scene['predicted_trajectory'].action, Marker.ADD)
         self.assertEqual(scene['reference_goal'].action, Marker.DELETE)
         self.assertEqual(scene['robot_heading'].points[-1].y, -0.5)

@@ -8,7 +8,8 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from rb2301_fp.global_planner_core import (GlobalPlanner, OccupancyGrid, PathFollower,
+from rb2301_fp import global_planner_core as core
+from rb2301_fp.global_planner_core import (GateDetector, GlobalPlanner, OccupancyGrid, PathFollower,
                                            resample_path)
 
 
@@ -179,10 +180,201 @@ class PathFollowerTests(unittest.TestCase):
         self.assertIs(self.follower.select_goal([0.0, 0.0], self.goal, 20.0), self.goal)
 
 
+class GateScene():
+    '''Grid built by writing log-odds directly, in a frame (u along the final direction, v sideways).'''
+    def __init__(self, direction='+x'):
+        self.direction = direction
+        self.grid = OccupancyGrid((0.0, 0.0))
+
+    def world(self, u, v):
+        return {'+x': (u, v), '-x': (-u, v), '+y': (v, u), '-y': (v, -u)}[self.direction]
+
+    def fill(self, u0, u1, v0, v1, value):
+        '''Set every cell of a (u, v) rectangle: -1 observed free, 0 unknown.'''
+        corners = self.grid.world_to_cell([self.world(u0, v0), self.world(u1, v1)])
+        (x0, y0), (x1, y1) = corners.min(axis=0), corners.max(axis=0)
+        self.grid.log_odds[y0:y1 + 1, x0:x1 + 1] = value
+
+    def wall(self, u0, v0, u1, v1):
+        points = [self.world(u, v) for u, v in wall((u0, v0), (u1, v1), spacing=0.01)]
+        cells = self.grid.world_to_cell(points)
+        self.grid.log_odds[cells[:, 1], cells[:, 0]] = self.grid.max_evidence
+
+    def gate(self, width=0.7, center=0.3, at=4.0, side=(-1.5, 1.8)):
+        '''Corridor along u with a cross wall at u = at and a gap of width centred at v = center.'''
+        self.fill(2.0, 6.0, side[0], side[1], -1.0)
+        for v in side:
+            self.wall(2.0, v, 6.0, v)
+        self.wall(at, side[0], at, center - width / 2.0)
+        self.wall(at, center + width / 2.0, at, side[1])
+        return self
+
+
+def drive(detector, scene, us, v, arm_offset=1.0):
+    '''Arm at a sideways offset (like the earlier course legs), then drive along u at v.
+
+    Returns the update results and the positions of the drive.
+    '''
+    detector.update(scene.grid, scene.world(us[0], v - arm_offset))
+    positions = [np.array(scene.world(u, v)) for u in us]
+    return [detector.update(scene.grid, p) for p in positions], positions
+
+
+FORWARD = np.arange(3.0, 5.2, 0.06) # through the gate wall at u = 4.0
+
+
+class GateDetectorTests(unittest.TestCase):
+    def assert_latches_at_gate(self, scene, v=0.3, center=(4.0, 0.3)):
+        detector = GateDetector(scene.direction)
+        results, positions = drive(detector, scene, FORWARD, v)
+        self.assertTrue(results[-1])
+        # Latches on the GATE_CONFIRM-th positive check of the first run of positives.
+        probe = GateDetector(scene.direction)
+        positive = [probe._find_gate(scene.grid, p) is not None for p in positions]
+        first = positive.index(True)
+        self.assertTrue(all(positive[first:first + core.GATE_CONFIRM]))
+        latch = results.index(True)
+        self.assertEqual(latch, first + core.GATE_CONFIRM - 1)
+        self.assertFalse(any(results[:latch]))
+        robot_u = FORWARD[latch]
+        self.assertTrue(4.0 < robot_u < 4.0 + core.GATE_BACK_MAX + 0.1, robot_u)
+        np.testing.assert_allclose(detector.gate_center, scene.world(*center),
+                                   atol=scene.grid.resolution + 1e-9)
+        return detector
+
+    def assert_never(self, scene, us=FORWARD, v=0.3, arm_offset=1.0):
+        detector = GateDetector(scene.direction)
+        results, _ = drive(detector, scene, us, v, arm_offset)
+        self.assertFalse(any(results))
+        self.assertFalse(detector.latched)
+        self.assertIsNone(detector.gate_center)
+
+    def test_gates_of_0_6_to_0_8_m_latch_after_confirm(self):
+        for width in (0.6, 0.7, 0.8):
+            with self.subTest(width=width):
+                detector = self.assert_latches_at_gate(GateScene().gate(width=width), v=0.32)
+                self.assertAlmostEqual(detector.gate_width, width, delta=0.1)
+
+    def test_robot_still_in_front_of_the_wall(self):
+        self.assert_never(GateScene().gate(), us=np.arange(2.5, 3.95, 0.06))
+
+    def test_corridor_with_side_walls_only(self):
+        scene = GateScene()
+        scene.fill(2.0, 6.0, 0.0, 0.6, -1.0)
+        scene.wall(2.0, 0.0, 6.0, 0.0)
+        scene.wall(2.0, 0.6, 6.0, 0.6)
+        self.assert_never(scene)
+
+    def test_solid_wall_behind_robot_after_corner(self):
+        scene = GateScene()
+        scene.fill(2.0, 6.0, -1.5, 1.8, -1.0)
+        scene.wall(3.8, -1.5, 3.8, 1.8)
+        scene.wall(3.8, -1.5, 6.0, -1.5)
+        scene.wall(3.8, 1.8, 6.0, 1.8)
+        self.assert_never(scene, us=np.arange(3.9, 5.2, 0.06))
+
+    def test_small_obstacle_next_to_side_wall(self):
+        scene = GateScene()
+        scene.fill(2.0, 6.0, -1.5, 1.8, -1.0)
+        for v in (-1.5, 1.8):
+            scene.wall(2.0, v, 6.0, v)
+        o0, o1 = -0.9, -0.83 # 7 cm obstacle, 0.6 m from the side wall
+        scene.wall(3.965, o0, 4.035, o0)
+        scene.wall(3.965, o1, 4.035, o1)
+        scene.wall(3.965, o0, 3.965, o1)
+        scene.wall(4.035, o0, 4.035, o1)
+        self.assert_never(scene, v=-1.2)
+
+    def test_box_next_to_side_wall(self):
+        scene = GateScene()
+        scene.fill(2.0, 6.0, -1.5, 1.8, -1.0)
+        for v in (-1.5, 1.8):
+            scene.wall(2.0, v, 6.0, v)
+        scene.fill(3.8, 4.2, -0.9, -0.5, 0.0) # inside of the box is never seen
+        o0, o1 = -0.9, -0.5 # 0.4 m box, 0.6 m from the side wall
+        scene.wall(3.8, o0, 4.2, o0)
+        scene.wall(3.8, o1, 4.2, o1)
+        scene.wall(3.8, o0, 3.8, o1)
+        scene.wall(4.2, o0, 4.2, o1)
+        self.assert_never(scene, v=-1.2)
+
+    def test_unobserved_gap_is_not_a_gate(self):
+        scene = GateScene().gate()
+        scene.fill(3.85, 4.15, -0.05, 0.65, 0.0)
+        self.assert_never(scene)
+
+    def test_wide_opening_is_not_a_gate(self):
+        self.assert_never(GateScene().gate(width=1.2, side=(-2.5, 2.5)))
+
+    def test_thick_offset_and_holed_walls_are_still_detected(self):
+        thick = GateScene().gate()
+        thick.wall(4.05, -1.5, 4.05, -0.05)
+        thick.wall(4.05, 0.65, 4.05, 1.8)
+        self.assert_latches_at_gate(thick, center=(4.025, 0.3))
+
+        offset = GateScene()
+        offset.fill(2.0, 6.0, -1.5, 1.8, -1.0)
+        for v in (-1.5, 1.8):
+            offset.wall(2.0, v, 6.0, v)
+        offset.wall(4.0, -1.5, 4.0, -0.05)
+        offset.wall(4.05, 0.65, 4.05, 1.8) # one cell further along
+        self.assert_latches_at_gate(offset, center=(4.025, 0.3))
+
+        holed = GateScene().gate()
+        for v in np.arange(-0.05 - 0.12, -1.5, -0.15).tolist() + np.arange(0.65 + 0.12, 1.8, 0.15).tolist():
+            holed.fill(4.0, 4.0, v, v, -1.0) # single-cell holes every third cell of both flanks
+        self.assert_latches_at_gate(holed)
+
+    def test_all_four_directions(self):
+        for direction in ('+x', '-x', '+y', '-y'):
+            with self.subTest(direction=direction):
+                self.assert_latches_at_gate(GateScene(direction).gate())
+
+    def test_not_armed_without_sideways_travel(self):
+        self.assert_never(GateScene().gate(), arm_offset=0.5)
+        detector = GateDetector('+x', arm_lateral=0.0) # arming disabled
+        self.assertTrue(any(drive(detector, GateScene().gate(), FORWARD, 0.3, arm_offset=0.0)[0]))
+
+    def test_crossing_against_the_final_direction(self):
+        self.assert_never(GateScene().gate(), us=FORWARD[::-1])
+        self.assert_never(GateScene('-y').gate(), us=FORWARD[::-1])
+
+    def test_stays_latched(self):
+        scene = GateScene().gate()
+        detector = self.assert_latches_at_gate(scene)
+        center = detector.gate_center.copy()
+        empty = OccupancyGrid((0.0, 0.0))
+        for position in ([0.0, 0.0], [4.5, 0.3], [-3.0, 7.0], [float('nan'), 0.0]):
+            self.assertTrue(detector.update(empty, position))
+        np.testing.assert_array_equal(detector.gate_center, center)
+
+    def test_rejects_unknown_direction(self):
+        with self.assertRaises(ValueError):
+            GateDetector('x')
+
+    def test_update_time(self):
+        scene = GateScene().gate()
+        detector = GateDetector('+x', confirm=10 ** 9) # never latches: every call runs the full check
+        detector.update(scene.grid, scene.world(3.0, -0.7))
+        positions = [scene.world(u, 0.3) for u in np.arange(3.0, 5.2, 0.02)]
+        times, peak_hits = [], 0
+        for p in positions:
+            started = time.perf_counter()
+            detector.update(scene.grid, p)
+            times.append(time.perf_counter() - started)
+            peak_hits = max(peak_hits, detector.hits)
+        self.assertGreater(peak_hits, core.GATE_CONFIRM) # the gate was found on many calls
+        mean_ms, max_ms = np.mean(times) * 1000.0, np.max(times) * 1000.0
+        print(f'\nGateDetector.update on {scene.grid.shape[0]}x{scene.grid.shape[1]} grid: '
+              f'mean {mean_ms * 1000.0:.0f} us, max {max_ms * 1000.0:.0f} us over {len(positions)} calls')
+        self.assertLess(mean_ms, 1.0)
+
+
 class Python38Tests(unittest.TestCase):
     def test_new_modules_parse_with_foxy_python38(self):
         package = Path(__file__).resolve().parents[1] / 'rb2301_fp'
-        for name in ('global_planner_core.py', 'global_planner.py', 'obstacle_course.py'):
+        for name in ('global_planner_core.py', 'global_planner.py', 'obstacle_course.py',
+                     'dynamic_window_approach.py'):
             ast.parse((package / name).read_text(), feature_version=(3, 8))
 
 

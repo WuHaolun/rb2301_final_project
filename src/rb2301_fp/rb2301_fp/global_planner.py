@@ -6,6 +6,9 @@ controller. The planning itself lives in global_planner_core.py (no ROS).
 
 Subscribes: scan, odom (simulation) or the Optitrack pose (real robot), global_goal
 Publishes:  global_path (nav_msgs/Path, frame id = visualization_frame)
+            gate_passed (geometry_msgs/PointStamped, latched, once): the robot has driven through
+            the gate; the point is the gate centre. With final_zone_mode:=direct the planner then
+            stops planning and publishes empty paths, so the controller drives to the final goal.
             global_map, global_costmap (nav_msgs/OccupancyGrid, latched, for RViz)
             With -p visualization_transport:=ssh the two grids are instead served as JSON
             snapshots on 127.0.0.1:visualization_port (8766) for rviz_fp.sh --ssh.
@@ -24,7 +27,7 @@ from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg, Odometry, Path
 from sensor_msgs.msg import LaserScan
 
 from rb2301_fp import global_planner_core as params # all defaults live at the top of global_planner_core.py
-from rb2301_fp.global_planner_core import GlobalPlanner
+from rb2301_fp.global_planner_core import GateDetector, GlobalPlanner
 from rb2301_fp.obstacle_course import (LidarNode, load_frame, optitrack_to_maze,
                                        robot_number_from_domain, yaw_from_quaternion)
 
@@ -62,10 +65,16 @@ class GlobalPlannerNode(Node):
             self._snapshot_server = VisualizationSnapshotServer(port)
             self.get_logger().info(
                 'SSH map visualization: http://127.0.0.1:{}/snapshot'.format(self._snapshot_server.port))
+        self.gate_detection = self.declare_parameter('gate_detection', True).value
+        self.final_zone_mode = self.declare_parameter('final_zone_mode', 'direct').value
+        if self.final_zone_mode not in ('direct', 'keep'):
+            raise ValueError('final_zone_mode must be direct or keep')
         self.log_period = params.LOG_PERIOD
 
         #======State======#
         self.planner = None # GlobalPlanner, created at the first pose so the grid is centred on it
+        self.gate_detector = None # GateDetector, created with the planner when gate_detection is on
+        self.gate_passed = False
         self.pose = None # [x, y, heading_deg], same frame as the controller
         self.yaw_rate = 0.0 # [rad/s] from consecutive poses
         self.goal = None # final goal from the controller
@@ -93,6 +102,8 @@ class GlobalPlannerNode(Node):
         self.path_publisher = self.create_publisher(Path, 'global_path', 10)
         self.map_publisher = self.create_publisher(OccupancyGridMsg, 'global_map', latched)
         self.costmap_publisher = self.create_publisher(OccupancyGridMsg, 'global_costmap', latched)
+        if self.gate_detection:
+            self.gate_publisher = self.create_publisher(PointStamped, 'gate_passed', latched)
 
         self.map_timer = self.create_timer(1.0 / map_update_rate, self.map_timer_callback)
         self.plan_timer = self.create_timer(1.0 / plan_rate, self.plan_timer_callback)
@@ -128,6 +139,11 @@ class GlobalPlannerNode(Node):
                 pose[:2], self.resolution, self.half_size, self.robot_half_width,
                 self.inflation_margin, self.cost_radius, self.cost_weight, self.path_spacing)
             self.get_logger().info(f'Map: {self.planner.grid.size}x{self.planner.grid.size} cells centred on {pose[:2]}')
+            if self.gate_detection:
+                direction = params.FINAL_DIRECTION_SIM if self.is_simulation else params.FINAL_DIRECTION_REAL
+                self.gate_detector = GateDetector(direction)
+                self.get_logger().info(f'Gate detection on, final direction {direction}, '
+                                       f'final_zone_mode={self.final_zone_mode}')
 
     def sub_scan_callback(self, msg:LaserScan):
         '''Keep only the latest scan with the pose it was taken at; the map timer consumes it.'''
@@ -161,14 +177,33 @@ class GlobalPlannerNode(Node):
         self._scan = None
         if abs(yaw_rate) > self.max_mapping_yaw_rate:
             self._skipped_scans += 1 # pose/scan timing skew smears the map while turning fast
+        else:
+            started = time.perf_counter()
+            self.planner.update_map(*self.scan_to_world(msg, pose))
+            self._stats['map'].append(time.perf_counter() - started)
+        self.update_gate()
+
+    def update_gate(self):
+        '''Check whether the robot has passed the gate; announce it once when it latches.'''
+        if self.gate_detector is None or self.gate_passed or self.pose is None:
             return
-        started = time.perf_counter()
-        self.planner.update_map(*self.scan_to_world(msg, pose))
-        self._stats['map'].append(time.perf_counter() - started)
+        if not self.gate_detector.update(self.planner.grid, self.pose[:2]):
+            return
+        self.gate_passed = True
+        center, width = self.gate_detector.gate_center, self.gate_detector.gate_width
+        self.get_logger().info(
+            f'Gate passed: centre {center}, width {width:.2f} m, robot at {self.pose[:2]}; '
+            f'final zone mode {self.final_zone_mode}')
+        msg = PointStamped()
+        msg.header.frame_id = self.frame_id
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.point.x, msg.point.y = float(center[0]), float(center[1])
+        self.gate_publisher.publish(msg)
 
     def plan_timer_callback(self):
         path = np.empty((0, 2))
-        if self.planner is not None and self.goal is not None and self.pose is not None:
+        direct = self.gate_passed and self.final_zone_mode == 'direct' # controller drives to the final goal
+        if not direct and self.planner is not None and self.goal is not None and self.pose is not None:
             started = time.perf_counter()
             path = self.planner.plan(self.pose[:2], self.goal)
             self._stats['plan'].append(time.perf_counter() - started)
@@ -235,9 +270,9 @@ class GlobalPlannerNode(Node):
                 return 'none'
             return f'mean={np.mean(values) * 1000.0:.1f} ms, max={np.max(values) * 1000.0:.1f} ms (n={len(values)})'
         reached = self.planner is not None and self.planner.goal_reached
-        self.get_logger().info(
+        self.get_logger().debug(
             f"Performance: map_update {summary(self._stats['map'])}, plan {summary(self._stats['plan'])}, "
-            f"skipped_scans={self._skipped_scans}, goal_reachable={reached}")
+            f"skipped_scans={self._skipped_scans}, goal_reachable={reached}, gate_passed={self.gate_passed}")
         self._stats = {'map': [], 'plan': []}
         self._skipped_scans = 0
 
